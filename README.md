@@ -4,6 +4,11 @@
 
 服务接收 Markdown 原文，渲染成带卡片样式的 PNG 图片返回。当前样式是浅灰背景、白色圆角卡片、橙色点缀、深色代码块，并保留代码语法高亮。
 
+## 效果预览
+
+![Markdown Preview Service 渲染效果](./test_output.png)
+
+
 ## 功能特性
 
 - Markdown 转 PNG
