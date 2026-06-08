@@ -363,13 +363,14 @@ impl SvgBuilder {
             self.y += if level == 1 { 18.0 } else { 42.0 };
         }
 
-        // Apply skew to headings for natural feel
-        let skew = "transform=\"skewX(-1)\"";
+        // Avoid skew transforms on tall SVGs because skewX uses the global coordinate
+        // system and can shift headings outside the left boundary as y grows.
+        let skew = "";
 
         // Vertical bar for H1 and H2
         if level <= 2 {
             self.elems.push(format!(
-                "<rect x=\"{}\" y=\"{}\" width=\"6\" height=\"{}\" rx=\"3\" fill=\"{COLOR_SEED}\" transform=\"skewX(-1)\"/>",
+                "<rect x=\"{}\" y=\"{}\" width=\"6\" height=\"{}\" rx=\"3\" fill=\"{COLOR_SEED}\"/>",
                 PADDING - 24.0,
                 self.y - font_size * 0.85,
                 font_size * 1.1,
@@ -619,12 +620,15 @@ impl SvgBuilder {
     fn add_code_block(&mut self, code: &str, language: &str) {
         self.y += 26.0;
 
-        let highlighted = highlight_code(code, language);
         let pad_x = 30.0;
         let chrome_h = 50.0;
         let pad_bottom = 34.0;
-        let block_h = highlighted.len() as f32 * CODE_LH + chrome_h + pad_bottom;
         let block_w = self.text_area_width();
+        let code_area_w = block_w - pad_x * 2.0;
+        let max_code_units = code_area_w / (CODE_FONT_SIZE * 0.58);
+        let wrapped_code = wrap_code_lines(code, max_code_units);
+        let highlighted = highlight_code(&wrapped_code, language);
+        let block_h = highlighted.len() as f32 * CODE_LH + chrome_h + pad_bottom;
 
         // 1. Code block container
         self.elems.push(format!(
@@ -1103,6 +1107,42 @@ fn has_visible_text(s: &str) -> bool {
         }
     }
     false
+}
+
+fn wrap_code_lines(code: &str, max_units: f32) -> String {
+    let mut out = String::new();
+
+    for raw_line in code.lines() {
+        let indent: String = raw_line
+            .chars()
+            .take_while(|ch| ch.is_whitespace())
+            .collect();
+        let continuation_indent = format!("{indent}  ");
+        let mut line = String::new();
+        let mut units = 0.0f32;
+
+        for ch in raw_line.chars() {
+            let ch_units = visual_units(ch);
+            if units + ch_units > max_units && !line.trim().is_empty() {
+                out.push_str(line.trim_end());
+                out.push('\n');
+                line.clear();
+                line.push_str(&continuation_indent);
+                units = visible_units(&continuation_indent);
+            }
+
+            line.push(ch);
+            units += ch_units;
+        }
+
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    out
 }
 
 fn visual_units(ch: char) -> f32 {
