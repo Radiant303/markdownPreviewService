@@ -7,7 +7,10 @@ use axum::{
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use resvg::usvg;
-use std::sync::{Arc, LazyLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock, Mutex},
+};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
@@ -47,6 +50,8 @@ const COLOR_CODE_BORDER: &str = "#444444";
 // ── Lazy-loaded global resources ──────────────────────────────────────────────
 static SS: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 static TS: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
+static MATH_SVG_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Build usvg options once (loads system fonts for CJK support).
 static USVG_OPTS: LazyLock<usvg::Options<'static>> = LazyLock::new(|| {
@@ -585,7 +590,7 @@ impl SvgBuilder {
             font_size: 24.0,
             horizontal_align: mathjax_svg_rs::HorizontalAlign::Center,
         };
-        let Ok(math_svg) = mathjax_svg_rs::render_tex(latex.trim(), &options) else {
+        let Ok(math_svg) = render_math_svg_cached(latex.trim(), &options) else {
             self.add_paragraph(&fallback);
             return;
         };
@@ -684,10 +689,12 @@ impl SvgBuilder {
         let card_w = self.w as f32 - OUTER_PADDING * 2.0;
         let card_h = h as f32 - OUTER_PADDING * 2.0;
 
-        let mut svg = format!(
+        let mut svg =
+            String::with_capacity(self.elems.iter().map(String::len).sum::<usize>() + 4096);
+        svg.push_str(&format!(
             "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"{}\" height=\"{h}\" viewBox=\"0 0 {} {h}\">",
             self.w, self.w,
-        );
+        ));
 
         // Definitions for gradients and shadows
         svg.push_str(&format!(
@@ -712,9 +719,15 @@ impl SvgBuilder {
             "<rect width=\"100%\" height=\"100%\" fill=\"{COLOR_SURFACE}\"/>"
         ));
 
-        // Card with shadow
+        let card_filter = if h > 6000 {
+            ""
+        } else {
+            " filter=\"url(#shadow)\""
+        };
+
+        // Card with shadow. Very tall images skip the blur filter because it is expensive over a huge area.
         svg.push_str(&format!(
-            "<rect x=\"{OUTER_PADDING}\" y=\"{OUTER_PADDING}\" width=\"{card_w}\" height=\"{card_h}\" rx=\"24\" fill=\"{COLOR_CARD}\" filter=\"url(#shadow)\"/>"
+            "<rect x=\"{OUTER_PADDING}\" y=\"{OUTER_PADDING}\" width=\"{card_w}\" height=\"{card_h}\" rx=\"24\" fill=\"{COLOR_CARD}\"{card_filter}/>"
         ));
 
         svg.push_str(
@@ -937,12 +950,41 @@ struct InlineMathSvg {
     inner: String,
 }
 
+fn render_math_svg_cached(
+    latex: &str,
+    options: &mathjax_svg_rs::Options,
+) -> Result<String, String> {
+    let align = match options.horizontal_align {
+        mathjax_svg_rs::HorizontalAlign::Left => "left",
+        mathjax_svg_rs::HorizontalAlign::Center => "center",
+        mathjax_svg_rs::HorizontalAlign::Right => "right",
+    };
+    let key = format!("{}|{align}|{latex}", options.font_size);
+
+    if let Some(svg) = MATH_SVG_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).cloned())
+    {
+        return Ok(svg);
+    }
+
+    let svg = mathjax_svg_rs::render_tex(latex, options)?;
+    if let Ok(mut cache) = MATH_SVG_CACHE.lock() {
+        if cache.len() > 512 {
+            cache.clear();
+        }
+        cache.insert(key, svg.clone());
+    }
+    Ok(svg)
+}
+
 fn inline_math_svg(latex: &str, font_size: f32) -> Option<(InlineMathSvg, f32, f32)> {
     let options = mathjax_svg_rs::Options {
         font_size: font_size as f64,
         horizontal_align: mathjax_svg_rs::HorizontalAlign::Left,
     };
-    let math_svg = mathjax_svg_rs::render_tex(latex.trim(), &options).ok()?;
+    let math_svg = render_math_svg_cached(latex.trim(), &options).ok()?;
     let (vb_x, vb_y, vb_w, vb_h) = svg_view_box(&math_svg)?;
     let inner = svg_inner_content(&math_svg)?.to_string();
 
