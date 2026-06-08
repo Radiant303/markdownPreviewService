@@ -18,7 +18,74 @@
 - 支持代码块语法高亮
 - 代码块不显示语言标签，例如 `rust` / `python`
 - 长中文段落自动换行
-- 默认使用系统字体 `0xProto Nerd Font Mono`，不存在时自动降级
+- 默认优先使用系统字体 `LXGW WenKai`，不存在时自动降级到常见中文字体
+
+## 前置操作：安装字体
+
+服务使用系统字体渲染 SVG 文本，推荐安装霞鹜文楷 TTF 字体，以获得最佳中文显示效果。
+
+当前字体栈优先级为：
+
+```css
+'LXGW WenKai', 'Microsoft YaHei', 'SimHei', 'Noto Sans CJK SC', sans-serif
+```
+
+如果系统没有安装 `LXGW WenKai`，会自动降级到后面的系统字体。
+
+### Windows 安装 TTF 字体
+
+1. 使用项目内的字体文件：
+   - `sources/fonts/LXGWWenKai-Regular.ttf`
+   - `sources/fonts/LXGWWenKai-Medium.ttf`
+2. 右键字体文件，选择 **安装** 或 **为所有用户安装**。
+3. 重新启动服务，让 `resvg/usvg` 重新加载系统字体。
+
+也可以将字体复制到：
+
+```text
+copy sources\fonts\LXGWWenKai-Regular.ttf C:\Windows\Fonts\
+copy sources\fonts\LXGWWenKai-Medium.ttf C:\Windows\Fonts\
+```
+
+### Linux 安装 TTF 字体
+
+为当前用户安装：
+
+```bash
+mkdir -p ~/.local/share/fonts
+cp sources/fonts/LXGWWenKai-Regular.ttf ~/.local/share/fonts/
+cp sources/fonts/LXGWWenKai-Medium.ttf ~/.local/share/fonts/
+fc-cache -fv
+```
+
+系统级安装：
+
+```bash
+sudo mkdir -p /usr/local/share/fonts/lxgw-wenkai
+sudo cp sources/fonts/LXGWWenKai-Regular.ttf /usr/local/share/fonts/lxgw-wenkai/
+sudo cp sources/fonts/LXGWWenKai-Medium.ttf /usr/local/share/fonts/lxgw-wenkai/
+sudo fc-cache -fv
+```
+
+安装完成后可以检查字体是否可见：
+
+```bash
+fc-match "LXGW WenKai"
+```
+
+### macOS 安装 TTF 字体
+
+1. 双击 `.ttf` 字体文件。
+2. 在“字体册”中点击 **安装字体**。
+3. 重新启动服务。
+
+也可以复制到当前用户字体目录：
+
+```bash
+mkdir -p ~/Library/Fonts
+cp sources/fonts/LXGWWenKai-Regular.ttf ~/Library/Fonts/
+cp sources/fonts/LXGWWenKai-Medium.ttf ~/Library/Fonts/
+```
 
 ## 快速开始
 
