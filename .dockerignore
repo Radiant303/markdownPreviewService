@@ -1,0 +1,9 @@
+target/**
+!target/x86_64-unknown-linux-musl/
+!target/x86_64-unknown-linux-musl/release/
+!target/x86_64-unknown-linux-musl/release/markdown-preview-service
+.git/
+.gitignore
+README.md
+test.md
+test_output.png

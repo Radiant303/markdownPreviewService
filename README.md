@@ -121,13 +121,55 @@ http://localhost:3001/
 Markdown-to-PNG Service is running
 ```
 
-### 方式二：使用 Cargo 运行
+### 方式二：使用 Docker 运行
+
+拉取镜像：
+
+```bash
+docker pull radiant303/markdown-preview-service:0.0.3
+```
+
+启动服务：
+
+```bash
+docker run -d \
+  --name markdown-preview-service \
+  -p 3001:3001 \
+  --restart unless-stopped \
+  radiant303/markdown-preview-service:0.0.3
+```
+
+启动后访问：
+
+```text
+http://localhost:3001/
+```
+
+生成 PNG：
+
+```bash
+curl -X POST --data-binary "@test.md" http://localhost:3001/generate -o output.png
+```
+
+停止服务：
+
+```bash
+docker stop markdown-preview-service
+```
+
+删除容器：
+
+```bash
+docker rm markdown-preview-service
+```
+
+### 方式三：使用 Cargo 运行
 
 ```powershell
 cargo run
 ```
 
-### 方式三：重新编译 release 版本
+### 方式四：重新编译 release 版本
 
 修改代码后，需要重新编译 release exe：
 
