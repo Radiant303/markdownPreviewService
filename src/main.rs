@@ -622,13 +622,14 @@ impl SvgBuilder {
 
         let pad_x = 30.0;
         let chrome_h = 50.0;
-        let pad_bottom = 34.0;
+        let pad_bottom = 20.0;
+        let content_y_offset = 6.0;
         let block_w = self.text_area_width();
         let code_area_w = block_w - pad_x * 2.0;
         let max_code_units = code_area_w / (CODE_FONT_SIZE * 0.58);
         let wrapped_code = wrap_code_lines(code, max_code_units);
         let highlighted = highlight_code(&wrapped_code, language);
-        let block_h = highlighted.len() as f32 * CODE_LH + chrome_h + pad_bottom;
+        let block_h = highlighted.len() as f32 * CODE_LH + chrome_h + pad_bottom + content_y_offset;
 
         // 1. Code block container
         self.elems.push(format!(
@@ -655,7 +656,7 @@ impl SvgBuilder {
         }
 
         // 2. Render highlighted code lines
-        let mut current_code_y = self.y + chrome_h + CODE_FONT_SIZE * 0.72;
+        let mut current_code_y = self.y + chrome_h + CODE_FONT_SIZE * 0.72 + content_y_offset;
 
         for tokens in &highlighted {
             let tspans: String = tokens
