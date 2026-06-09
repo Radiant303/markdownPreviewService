@@ -755,13 +755,15 @@ impl SvgBuilder {
         let header_y = OUTER_PADDING + HEADER_TOP + 10.0;
         let font_stack =
             "font-family:'LXGW WenKai Mono','LXGWWenKaiMono','Microsoft YaHei','SimHei','Noto Sans CJK SC',sans-serif";
+        let dot_radius = 4.0;
+        let dot_cx = PADDING + dot_radius;
+        let date_x = dot_cx + dot_radius + 8.0;
+        let words_x = self.w as f32 - PADDING + 3.5;
+
         format!(
-            "<circle cx=\"{}\" cy=\"{}\" r=\"4\" fill=\"{COLOR_SEED}\"/><text x=\"{}\" y=\"{header_y}\" font-size=\"25\" font-weight=\"700\" fill=\"{COLOR_TEXT_MUTED}\" stroke=\"{COLOR_TEXT_MUTED}\" stroke-width=\"0.8\" style=\"{font_stack}\" letter-spacing=\"1.2\">{}</text><text x=\"{}\" y=\"{header_y}\" font-size=\"25\" font-weight=\"700\" fill=\"{COLOR_TEXT_MUTED}\" stroke=\"{COLOR_TEXT_MUTED}\" stroke-width=\"0.8\" style=\"{font_stack}\" letter-spacing=\"1.2\" text-anchor=\"end\">{}</text>",
-            PADDING,
+            "<circle cx=\"{dot_cx}\" cy=\"{}\" r=\"{dot_radius}\" fill=\"{COLOR_SEED}\"/><text x=\"{date_x}\" y=\"{header_y}\" font-size=\"25\" font-weight=\"700\" fill=\"{COLOR_TEXT_MUTED}\" stroke=\"{COLOR_TEXT_MUTED}\" stroke-width=\"0.8\" style=\"{font_stack}\" letter-spacing=\"1.2\">{}</text><text x=\"{words_x}\" y=\"{header_y}\" font-size=\"25\" font-weight=\"700\" fill=\"{COLOR_TEXT_MUTED}\" stroke=\"{COLOR_TEXT_MUTED}\" stroke-width=\"0.8\" style=\"{font_stack}\" letter-spacing=\"1.2\" text-anchor=\"end\">{}</text>",
             header_y - 7.0,
-            PADDING + 20.0,
             date_str,
-            self.w as f32 - PADDING,
             esc(&words),
         )
     }
@@ -1153,11 +1155,9 @@ fn char_visual_width(ch: char) -> f32 {
             ' ' => 0.38,
             'A'..='Z' => 0.62,
             'a'..='z' | '0'..='9' => 0.54,
-            _ => 0.48,
+            _ => 0.54,
         }
-    } else if is_cjk_punctuation(ch) {
-        0.88
-    } else if is_cjk(ch) {
+    } else if is_cjk_punctuation(ch) || is_cjk(ch) {
         1.02
     } else {
         0.9
