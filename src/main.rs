@@ -53,6 +53,7 @@ static SS: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines
 static TS: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 static MATH_SVG_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static FONT_SYSTEM: LazyLock<Mutex<FontSystem>> = LazyLock::new(|| Mutex::new(FontSystem::new()));
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TextStyle {
@@ -124,20 +125,33 @@ async fn main() {
 // ── HTTP handler ──────────────────────────────────────────────────────────────
 async fn generate_handler(body: Bytes) -> Response {
     let markdown = String::from_utf8_lossy(&body).to_string();
-    let svg = markdown_to_svg(&markdown);
 
-    match svg_to_png(&svg) {
-        Ok(png) => Response::builder()
+    let render_result = tokio::task::spawn_blocking(move || {
+        let svg = markdown_to_svg(&markdown);
+        svg_to_png(&svg)
+    })
+    .await;
+
+    match render_result {
+        Ok(Ok(png)) => Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "image/png")
             .body(axum::body::Body::from(png))
             .unwrap()
             .into_response(),
-        Err(e) => {
+        Ok(Err(e)) => {
             eprintln!("[ERROR] render failed: {e}");
             Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(axum::body::Body::from(format!("render error: {e}")))
+                .unwrap()
+                .into_response()
+        }
+        Err(e) => {
+            eprintln!("[ERROR] render task failed: {e}");
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(axum::body::Body::from(format!("render task error: {e}")))
                 .unwrap()
                 .into_response()
         }
@@ -376,7 +390,6 @@ struct SvgBuilder {
     y: f32,
     w: u32,
     word_count: usize,
-    font_system: FontSystem,
 }
 
 impl SvgBuilder {
@@ -386,7 +399,6 @@ impl SvgBuilder {
             y: OUTER_PADDING + HEADER_TOP + HEADER_BOTTOM + 88.0,
             w: width,
             word_count,
-            font_system: FontSystem::new(),
         }
     }
 
@@ -402,13 +414,7 @@ impl SvgBuilder {
             _ => "#333333",
         };
         let available_w = self.text_area_width();
-        let lines = layout_rich_lines(
-            &mut self.font_system,
-            runs,
-            available_w,
-            font_size,
-            line_height,
-        );
+        let lines = layout_rich_lines(runs, available_w, font_size, line_height);
 
         if self.y > OUTER_PADDING + HEADER_TOP + HEADER_BOTTOM + 88.0 {
             self.y += if level == 1 { 18.0 } else { 42.0 };
@@ -445,13 +451,7 @@ impl SvgBuilder {
         }
 
         let available_w = self.text_area_width();
-        let lines = layout_rich_lines(
-            &mut self.font_system,
-            runs,
-            available_w,
-            BODY_FONT_SIZE,
-            LINE_HEIGHT,
-        );
+        let lines = layout_rich_lines(runs, available_w, BODY_FONT_SIZE, LINE_HEIGHT);
 
         self.y += 6.0;
         for line_runs in &lines {
@@ -472,13 +472,7 @@ impl SvgBuilder {
     fn add_list_item(&mut self, runs: &[TextRun], prefix: &str) {
         let available_w = self.text_area_width() - 44.0;
         let is_ord = ordered_prefix(prefix);
-        let lines = layout_rich_lines(
-            &mut self.font_system,
-            runs,
-            available_w,
-            BODY_FONT_SIZE,
-            LINE_HEIGHT,
-        );
+        let lines = layout_rich_lines(runs, available_w, BODY_FONT_SIZE, LINE_HEIGHT);
 
         self.y += 8.0;
         for (i, line_runs) in lines.iter().enumerate() {
@@ -525,16 +519,11 @@ impl SvgBuilder {
         let inner_x = PADDING + 44.0;
         let quote_pad_y = 36.0;
         let quote_w = self.text_area_width();
-        let lines: Vec<Vec<TextRun>> = layout_rich_lines(
-            &mut self.font_system,
-            runs,
-            quote_w - 88.0,
-            BODY_FONT_SIZE,
-            LINE_HEIGHT,
-        )
-        .into_iter()
-        .filter(|line| runs_have_visible_text(line))
-        .collect();
+        let lines: Vec<Vec<TextRun>> =
+            layout_rich_lines(runs, quote_w - 88.0, BODY_FONT_SIZE, LINE_HEIGHT)
+                .into_iter()
+                .filter(|line| runs_have_visible_text(line))
+                .collect();
 
         if lines.is_empty() {
             return;
@@ -654,7 +643,7 @@ impl SvgBuilder {
             "<text x=\"{x}\" y=\"{baseline_y}\" font-size=\"{font_size}\" fill=\"{fill}\" {attrs}>{tspans}</text>"
         ));
 
-        measure_runs_width(&mut self.font_system, runs, font_size)
+        measure_runs_width(runs, font_size)
     }
 
     // ── Math block (MathJax-rendered SVG) ──────────────────────────────
@@ -919,12 +908,12 @@ fn highlight_code(code: &str, language: &str) -> Vec<Vec<(String, String)>> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn layout_rich_lines(
-    font_system: &mut FontSystem,
     runs: &[TextRun],
     max_width: f32,
     font_size: f32,
     line_height: f32,
 ) -> Vec<Vec<TextRun>> {
+    let mut font_system = FONT_SYSTEM.lock().expect("font system mutex poisoned");
     let logical_lines = split_runs_on_newlines(runs);
     let mut out = Vec::new();
 
@@ -935,8 +924,8 @@ fn layout_rich_lines(
         }
 
         let metrics = Metrics::new(font_size, line_height);
-        let mut buffer = Buffer::new(font_system, metrics);
-        buffer.set_size(font_system, Some(max_width), None);
+        let mut buffer = Buffer::new(&mut font_system, metrics);
+        buffer.set_size(&mut font_system, Some(max_width), None);
 
         let mut full_text = String::new();
         let mut byte_styles = Vec::new();
@@ -954,7 +943,7 @@ fn layout_rich_lines(
         }
 
         buffer.set_rich_text(
-            font_system,
+            &mut font_system,
             spans,
             attrs_for_style(TextStyle::Normal),
             Shaping::Advanced,
@@ -1024,14 +1013,15 @@ fn slice_runs_by_byte_range(
     runs
 }
 
-fn measure_runs_width(font_system: &mut FontSystem, runs: &[TextRun], font_size: f32) -> f32 {
+fn measure_runs_width(runs: &[TextRun], font_size: f32) -> f32 {
     if !runs_have_visible_text(runs) {
         return 0.0;
     }
 
+    let mut font_system = FONT_SYSTEM.lock().expect("font system mutex poisoned");
     let metrics = Metrics::new(font_size, font_size * 1.4);
-    let mut buffer = Buffer::new(font_system, metrics);
-    buffer.set_size(font_system, None, None);
+    let mut buffer = Buffer::new(&mut font_system, metrics);
+    buffer.set_size(&mut font_system, None, None);
 
     let mut full_text = String::new();
     let mut ranges = Vec::new();
@@ -1047,7 +1037,7 @@ fn measure_runs_width(font_system: &mut FontSystem, runs: &[TextRun], font_size:
     }
 
     buffer.set_rich_text(
-        font_system,
+        &mut font_system,
         spans,
         attrs_for_style(TextStyle::Normal),
         Shaping::Advanced,
