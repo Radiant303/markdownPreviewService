@@ -1150,13 +1150,15 @@ fn char_visual_width(ch: char) -> f32 {
         0.0
     } else if ch.is_ascii() {
         match ch {
-            ' ' => 0.40,
-            'A'..='Z' => 0.53,
-            'a'..='z' | '0'..='9' => 0.50,
-            _ => 0.45,
+            ' ' => 0.38,
+            'A'..='Z' => 0.62,
+            'a'..='z' | '0'..='9' => 0.54,
+            _ => 0.48,
         }
-    } else if is_cjk_punctuation(ch) || is_cjk(ch) {
-        1.00
+    } else if is_cjk_punctuation(ch) {
+        0.88
+    } else if is_cjk(ch) {
+        1.02
     } else {
         0.9
     }
