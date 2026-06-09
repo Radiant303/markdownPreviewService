@@ -584,6 +584,7 @@ impl SvgBuilder {
         runs: &[TextRun],
     ) {
         let mut current_x = x;
+        let mut text_group: Vec<TextRun> = Vec::new();
 
         for run in runs {
             if run.text.is_empty() {
@@ -591,6 +592,16 @@ impl SvgBuilder {
             }
 
             if run.style == TextStyle::Math {
+                current_x += self.render_text_group(
+                    current_x,
+                    baseline_y,
+                    font_size,
+                    fill,
+                    attrs,
+                    &text_group,
+                );
+                text_group.clear();
+
                 if let Some((svg, w, h)) = inline_math_svg(&run.text, font_size) {
                     let y = baseline_y - h * 0.78;
                     self.elems.push(format!(
@@ -600,38 +611,50 @@ impl SvgBuilder {
                     current_x += w + font_size * 0.18;
                 } else {
                     let fallback = TextRun::new(format!("${}$", run.text), TextStyle::Math);
-                    current_x += self.render_text_run_styled(
-                        current_x, baseline_y, font_size, fill, attrs, &fallback,
+                    current_x += self.render_text_group(
+                        current_x,
+                        baseline_y,
+                        font_size,
+                        fill,
+                        attrs,
+                        &[fallback],
                     );
                 }
-                continue;
+            } else {
+                text_group.push(run.clone());
             }
-
-            current_x +=
-                self.render_text_run_styled(current_x, baseline_y, font_size, fill, attrs, run);
         }
+
+        self.render_text_group(current_x, baseline_y, font_size, fill, attrs, &text_group);
     }
 
-    fn render_text_run_styled(
+    fn render_text_group(
         &mut self,
         x: f32,
         baseline_y: f32,
         font_size: f32,
         fill: &str,
         attrs: &str,
-        run: &TextRun,
+        runs: &[TextRun],
     ) -> f32 {
-        if run.text.is_empty() {
+        if !runs_have_visible_text(runs) {
             return 0.0;
         }
 
-        let (run_fill, style_attrs, text) = svg_style_for_run(run, fill);
+        let tspans: String = runs
+            .iter()
+            .filter(|run| !run.text.is_empty())
+            .map(|run| {
+                let (tspan_attrs, text) = svg_tspan_for_run(run);
+                format!("<tspan {tspan_attrs}>{}</tspan>", esc(&text))
+            })
+            .collect();
+
         self.elems.push(format!(
-            "<text x=\"{x}\" y=\"{baseline_y}\" font-size=\"{font_size}\" fill=\"{run_fill}\" {attrs} {style_attrs}>{}</text>",
-            esc(&text)
+            "<text x=\"{x}\" y=\"{baseline_y}\" font-size=\"{font_size}\" fill=\"{fill}\" {attrs}>{tspans}</text>"
         ));
 
-        measure_runs_width(&mut self.font_system, std::slice::from_ref(run), font_size)
+        measure_runs_width(&mut self.font_system, runs, font_size)
     }
 
     // ── Math block (MathJax-rendered SVG) ──────────────────────────────
@@ -1048,25 +1071,16 @@ fn attrs_for_style(style: TextStyle) -> Attrs<'static> {
     attrs
 }
 
-fn svg_style_for_run(run: &TextRun, default_fill: &str) -> (String, &'static str, String) {
+fn svg_tspan_for_run(run: &TextRun) -> (&'static str, String) {
     match run.style {
-        TextStyle::Normal => (default_fill.to_string(), "", run.text.clone()),
-        TextStyle::Bold => (
-            default_fill.to_string(),
-            "font-weight=\"700\"",
-            run.text.clone(),
-        ),
-        TextStyle::Italic => (
-            default_fill.to_string(),
-            "font-style=\"italic\"",
-            run.text.clone(),
-        ),
+        TextStyle::Normal => ("", run.text.clone()),
+        TextStyle::Bold => ("font-weight=\"700\"", run.text.clone()),
+        TextStyle::Italic => ("font-style=\"italic\"", run.text.clone()),
         TextStyle::Code => (
-            COLOR_SEED.to_string(),
-            "font-family=\"LXGW WenKai Mono, monospace\"",
+            "fill=\"#ff9500\" font-family=\"LXGW WenKai Mono, monospace\"",
             run.text.clone(),
         ),
-        TextStyle::Math => ("#0f766e".to_string(), "", format!("${}$", run.text)),
+        TextStyle::Math => ("fill=\"#0f766e\"", format!("${}$", run.text)),
     }
 }
 
