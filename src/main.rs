@@ -339,7 +339,7 @@ impl SvgBuilder {
     fn new(width: u32, word_count: usize) -> Self {
         Self {
             elems: Vec::new(),
-            y: OUTER_PADDING + HEADER_TOP + HEADER_BOTTOM + 58.0,
+            y: OUTER_PADDING + HEADER_TOP + HEADER_BOTTOM + 88.0,
             w: width,
             word_count,
         }
@@ -359,7 +359,7 @@ impl SvgBuilder {
         let max_chars = self.max_chars_proportional(font_size);
         let lines = wrap_text(text, max_chars);
 
-        if self.y > OUTER_PADDING + HEADER_TOP + HEADER_BOTTOM + 58.0 {
+        if self.y > OUTER_PADDING + HEADER_TOP + HEADER_BOTTOM + 88.0 {
             self.y += if level == 1 { 18.0 } else { 42.0 };
         }
 
@@ -385,7 +385,7 @@ impl SvgBuilder {
             ));
             self.y += line_height;
         }
-        self.y += 24.0;
+        self.y += 12.0;
     }
 
     // ── Paragraph ─────────────────────────────────────────────────────
@@ -756,13 +756,13 @@ impl SvgBuilder {
         };
         let now = chrono::Local::now();
         let date_str = now.format("%Y.%m.%d").to_string();
-        let header_y = OUTER_PADDING + HEADER_TOP;
+        let header_y = OUTER_PADDING + HEADER_TOP + 10.0;
         let font_stack =
-            "font-family:'LXGW WenKai','Microsoft YaHei','SimHei','Noto Sans CJK SC',sans-serif";
+            "font-family:'LXGW WenKai Mono','LXGWWenKaiMono','Microsoft YaHei','SimHei','Noto Sans CJK SC',sans-serif";
         format!(
-            "<circle cx=\"{}\" cy=\"{}\" r=\"4\" fill=\"{COLOR_SEED}\"/><text x=\"{}\" y=\"{header_y}\" font-size=\"25\" font-weight=\"600\" fill=\"{COLOR_TEXT_MUTED}\" style=\"{font_stack}\" letter-spacing=\"1.2\">{}</text><text x=\"{}\" y=\"{header_y}\" font-size=\"25\" font-weight=\"600\" fill=\"{COLOR_TEXT_MUTED}\" style=\"{font_stack}\" letter-spacing=\"1.2\" text-anchor=\"end\">{}</text>",
+            "<circle cx=\"{}\" cy=\"{}\" r=\"4\" fill=\"{COLOR_SEED}\"/><text x=\"{}\" y=\"{header_y}\" font-size=\"25\" font-weight=\"700\" fill=\"{COLOR_TEXT_MUTED}\" stroke=\"{COLOR_TEXT_MUTED}\" stroke-width=\"0.8\" style=\"{font_stack}\" letter-spacing=\"1.2\">{}</text><text x=\"{}\" y=\"{header_y}\" font-size=\"25\" font-weight=\"700\" fill=\"{COLOR_TEXT_MUTED}\" stroke=\"{COLOR_TEXT_MUTED}\" stroke-width=\"0.8\" style=\"{font_stack}\" letter-spacing=\"1.2\" text-anchor=\"end\">{}</text>",
             PADDING,
-            OUTER_PADDING + HEADER_TOP - 7.0,
+            header_y - 7.0,
             PADDING + 20.0,
             date_str,
             self.w as f32 - PADDING,

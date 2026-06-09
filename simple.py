@@ -1,9 +1,15 @@
 # %% Python调用接口示例
 import requests
 
-url = "http://localhost:3001/generate"
+url = "https://md.guoliguoli.cc/generate"
 
-markdown = """# XU JP
+markdown = """这是对 **Markdown转PNG** 服务的测试。
+
+## 功能
+
+- 支持标题
+- 支持列表
+- 支持代码块
 """
 
 response = requests.post(
@@ -19,8 +25,3 @@ with open("output.png", "wb") as f:
     f.write(response.content)
 
 print("PNG 已保存到 output.png")
-
-# 
-
-
-# P 
