@@ -2,7 +2,7 @@
 
 一个基于 Rust + Axum 的 Markdown 转 PNG 图片服务。
 
-服务接收 Markdown 原文，渲染成带卡片样式的 PNG 图片返回。当前样式是浅灰背景、白色圆角卡片、橙色点缀、深色代码块，并保留代码语法高亮。
+服务接收 Markdown 原文，渲染成带卡片样式的 PNG 图片返回。当前样式是浅灰背景、白色圆角卡片、橙色点缀、深色代码块，并保留代码语法高亮。正文排版使用 `cosmic-text` 做字体度量与自动换行。
 
 ## 效果预览
 
@@ -16,8 +16,9 @@
 - 支持标题、段落、列表、分割线
 - 支持任务列表
 - 支持代码块语法高亮
-- 代码块不显示语言标签，例如 `rust` / `python`
-- 长中文段落自动换行
+- 代码块会先进行语法高亮，再按可用宽度自动换行
+- 支持中英文混排文本自动换行
+- 使用 `cosmic-text` 进行正文、标题、列表和引用的字体度量排版
 - 默认优先使用系统字体 `LXGW WenKai`，不存在时自动降级到常见中文字体
 
 ## 前置操作：安装字体
@@ -30,6 +31,8 @@
 'LXGW WenKai', 'Microsoft YaHei', 'SimHei', 'Noto Sans CJK SC', sans-serif
 ```
 
+Docker 镜像已经内置项目字体并刷新字体缓存，使用 Docker 运行时不需要手动安装字体。
+
 如果系统没有安装 `LXGW WenKai`，会自动降级到后面的系统字体。
 
 ### Windows 安装 TTF 字体
@@ -37,6 +40,7 @@
 1. 使用项目内的字体文件：
    - `sources/fonts/LXGWWenKai-Regular.ttf`
    - `sources/fonts/LXGWWenKai-Medium.ttf`
+   - `sources/fonts/LXGWWenKaiMono-Medium.ttf`
 2. 右键字体文件，选择 **安装** 或 **为所有用户安装**。
 3. 重新启动服务，让 `resvg/usvg` 重新加载系统字体。
 
@@ -45,6 +49,7 @@
 ```text
 copy sources\fonts\LXGWWenKai-Regular.ttf C:\Windows\Fonts\
 copy sources\fonts\LXGWWenKai-Medium.ttf C:\Windows\Fonts\
+copy sources\fonts\LXGWWenKaiMono-Medium.ttf C:\Windows\Fonts\
 ```
 
 ### Linux 安装 TTF 字体
@@ -55,6 +60,7 @@ copy sources\fonts\LXGWWenKai-Medium.ttf C:\Windows\Fonts\
 mkdir -p ~/.local/share/fonts
 cp sources/fonts/LXGWWenKai-Regular.ttf ~/.local/share/fonts/
 cp sources/fonts/LXGWWenKai-Medium.ttf ~/.local/share/fonts/
+cp sources/fonts/LXGWWenKaiMono-Medium.ttf ~/.local/share/fonts/
 fc-cache -fv
 ```
 
@@ -64,6 +70,7 @@ fc-cache -fv
 sudo mkdir -p /usr/local/share/fonts/lxgw-wenkai
 sudo cp sources/fonts/LXGWWenKai-Regular.ttf /usr/local/share/fonts/lxgw-wenkai/
 sudo cp sources/fonts/LXGWWenKai-Medium.ttf /usr/local/share/fonts/lxgw-wenkai/
+sudo cp sources/fonts/LXGWWenKaiMono-Medium.ttf /usr/local/share/fonts/lxgw-wenkai/
 sudo fc-cache -fv
 ```
 
@@ -85,6 +92,7 @@ fc-match "LXGW WenKai"
 mkdir -p ~/Library/Fonts
 cp sources/fonts/LXGWWenKai-Regular.ttf ~/Library/Fonts/
 cp sources/fonts/LXGWWenKai-Medium.ttf ~/Library/Fonts/
+cp sources/fonts/LXGWWenKaiMono-Medium.ttf ~/Library/Fonts/
 ```
 
 ## 快速开始
@@ -126,7 +134,7 @@ Markdown-to-PNG Service is running
 拉取镜像：
 
 ```bash
-docker pull radiant303/markdown-preview-service:0.0.3
+docker pull radiant303/markdown-preview-service:0.0.4
 ```
 
 启动服务：
@@ -136,7 +144,7 @@ docker run -d \
   --name markdown-preview-service \
   -p 3001:3001 \
   --restart unless-stopped \
-  radiant303/markdown-preview-service:0.0.3
+  radiant303/markdown-preview-service:0.0.4
 ```
 
 启动后访问：
@@ -350,27 +358,16 @@ src/main.rs
 - 列表样式：`add_list_item`
 - 字体栈：`build` 中的 SVG `<style>`
 
-当前字体优先级：
+当前正文字体优先级：
 
 ```css
-'0xProto Nerd Font Mono',
-Microsoft YaHei,
-SimHei,
-Noto Sans CJK SC,
-WenQuanYi Micro Hei,
-PingFang SC,
-Hiragino Sans GB,
-monospace,
-sans-serif
+'LXGW WenKai', 'Microsoft YaHei', 'SimHei', 'Noto Sans CJK SC', sans-serif
 ```
 
 代码块字体优先级：
 
 ```css
-'0xProto Nerd Font Mono',
-Consolas,
-Courier New,
-monospace
+'LXGW WenKai Mono', monospace
 ```
 
 ## 注意事项

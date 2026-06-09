@@ -728,7 +728,7 @@ impl SvgBuilder {
                 .collect();
 
             self.elems.push(format!(
-                "<text x=\"{}\" y=\"{current_code_y}\" font-size=\"{CODE_FONT_SIZE}\" font-family=\"LXGW WenKai Mono, monospace\" xml:space=\"preserve\">{tspans}</text>",
+                "<text x=\"{}\" y=\"{current_code_y}\" font-size=\"{CODE_FONT_SIZE}\" style=\"font-family:'LXGW WenKai Mono','LXGWWenKaiMono','Microsoft YaHei','SimHei','Noto Sans CJK SC',sans-serif\" xml:space=\"preserve\">{tspans}</text>",
                 PADDING + pad_x,
             ));
 
@@ -1244,10 +1244,8 @@ fn code_text_width(text: &str, font_size: f32) -> f32 {
 }
 
 fn code_char_width(ch: char, font_size: f32) -> f32 {
-    let unit = if ch == ' ' {
-        0.5
-    } else if is_ascii_printable(ch) {
-        0.62
+    let unit = if is_ascii_printable(ch) {
+        0.54
     } else if is_cjk_punctuation(ch) || is_cjk(ch) {
         1.0
     } else {
