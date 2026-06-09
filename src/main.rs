@@ -1150,7 +1150,7 @@ fn visual_units(ch: char) -> f32 {
 fn char_visual_width(ch: char) -> f32 {
     if (ch as u32) < 32 {
         0.0
-    } else if ch.is_ascii() {
+    } else if is_ascii_printable(ch) {
         match ch {
             ' ' => 0.38,
             'A'..='Z' => 0.62,
@@ -1164,68 +1164,24 @@ fn char_visual_width(ch: char) -> f32 {
     }
 }
 
+fn is_ascii_printable(ch: char) -> bool {
+    matches!(ch as u32, 0x0020..=0x007E)
+}
+
 fn is_cjk_punctuation(ch: char) -> bool {
-    matches!(
-        ch,
-        '，' | '。'
-            | '！'
-            | '？'
-            | '：'
-            | '；'
-            | '（'
-            | '）'
-            | '【'
-            | '】'
-            | '“'
-            | '”'
-            | '、'
-            | '《'
-            | '》'
-            | '「'
-            | '」'
-            | '『'
-            | '』'
-            | '—'
-            | '…'
-    )
+    matches!(ch as u32, 0x3000..=0x303F | 0xFF00..=0xFFEF)
 }
 
 fn is_cjk(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x4E00..=0x9FFF
-            | 0x3400..=0x4DBF
-            | 0x3000..=0x303F
-            | 0xFF00..=0xFFEF
-    )
+    matches!(ch as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF)
 }
 
 fn is_no_line_start_punctuation(ch: char) -> bool {
-    matches!(
-        ch,
-        '，' | '。'
-            | '、'
-            | '；'
-            | '：'
-            | '！'
-            | '？'
-            | '）'
-            | '】'
-            | '》'
-            | '」'
-            | '』'
-            | '”'
-            | '’'
-            | ','
-            | '.'
-            | ';'
-            | ':'
-            | '!'
-            | '?'
-            | ')'
-            | ']'
-            | '}'
-    )
+    is_cjk_punctuation(ch)
+        || matches!(
+            ch,
+            ',' | '.' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '\'' | '"'
+        )
 }
 
 /// Returns true for ordered list prefixes such as "1. ".
