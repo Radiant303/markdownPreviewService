@@ -5,6 +5,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style, Weight};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use resvg::usvg;
 use std::{
@@ -52,6 +53,50 @@ static SS: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines
 static TS: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 static MATH_SVG_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextStyle {
+    Normal,
+    Bold,
+    Italic,
+    Code,
+    Math,
+}
+
+#[derive(Clone, Debug)]
+struct TextRun {
+    text: String,
+    style: TextStyle,
+}
+
+impl TextRun {
+    fn new(text: impl Into<String>, style: TextStyle) -> Self {
+        Self {
+            text: text.into(),
+            style,
+        }
+    }
+}
+
+fn push_text_run(runs: &mut Vec<TextRun>, text: impl AsRef<str>, style: TextStyle) {
+    let text = text.as_ref();
+    if text.is_empty() {
+        return;
+    }
+
+    if let Some(last) = runs.last_mut() {
+        if last.style == style {
+            last.text.push_str(text);
+            return;
+        }
+    }
+
+    runs.push(TextRun::new(text, style));
+}
+
+fn runs_have_visible_text(runs: &[TextRun]) -> bool {
+    runs.iter().any(|run| !run.text.trim().is_empty())
+}
 
 /// Build usvg options once (loads system fonts for CJK support).
 static USVG_OPTS: LazyLock<usvg::Options<'static>> = LazyLock::new(|| {
@@ -121,14 +166,14 @@ fn markdown_to_svg(markdown: &str) -> String {
     let mut heading_lvl: u8 = 0;
 
     let mut in_para = false;
-    let mut text_buf = String::new();
-
     let mut in_list = false;
     let mut ordered = false;
     let mut list_idx: u64 = 0;
-
     let mut in_quote = false;
-    let mut quote_buf = String::new();
+
+    let mut runs: Vec<TextRun> = Vec::new();
+    let mut quote_runs: Vec<TextRun> = Vec::new();
+    let mut style_stack = vec![TextStyle::Normal];
 
     for event in parser {
         match event {
@@ -156,7 +201,7 @@ fn markdown_to_svg(markdown: &str) -> String {
                     HeadingLevel::H2 => 2,
                     _ => 3,
                 };
-                text_buf.clear();
+                runs.clear();
             }
             Event::End(TagEnd::Heading(_)) => {
                 if in_heading {
@@ -165,8 +210,8 @@ fn markdown_to_svg(markdown: &str) -> String {
                         2 => (H2_SIZE, H2_LH),
                         _ => (H3_SIZE, H3_LH),
                     };
-                    b.add_heading(&text_buf, fs, lh, heading_lvl);
-                    text_buf.clear();
+                    b.add_heading(&runs, fs, lh, heading_lvl);
+                    runs.clear();
                     in_heading = false;
                 }
             }
@@ -174,12 +219,12 @@ fn markdown_to_svg(markdown: &str) -> String {
             // ── Block quotes ────────────────────────────────────────────
             Event::Start(Tag::BlockQuote(_)) => {
                 in_quote = true;
-                quote_buf.clear();
+                quote_runs.clear();
             }
             Event::End(TagEnd::BlockQuote(_)) => {
                 if in_quote {
-                    b.add_blockquote(quote_buf.trim());
-                    quote_buf.clear();
+                    b.add_blockquote(&quote_runs);
+                    quote_runs.clear();
                     in_quote = false;
                 }
             }
@@ -188,19 +233,17 @@ fn markdown_to_svg(markdown: &str) -> String {
             Event::Start(Tag::Paragraph) => {
                 in_para = true;
                 if !in_quote {
-                    text_buf.clear();
+                    runs.clear();
                 }
             }
             Event::End(TagEnd::Paragraph) => {
                 if in_quote {
-                    if !quote_buf.ends_with('\n') {
-                        quote_buf.push('\n');
-                    }
-                    text_buf.clear();
+                    push_text_run(&mut quote_runs, "\n", current_style(&style_stack));
+                    runs.clear();
                     in_para = false;
                 } else if in_para {
-                    b.add_paragraph(&text_buf);
-                    text_buf.clear();
+                    b.add_paragraph(&runs);
+                    runs.clear();
                     in_para = false;
                 }
             }
@@ -209,35 +252,13 @@ fn markdown_to_svg(markdown: &str) -> String {
             Event::Start(Tag::List(start)) => {
                 in_list = true;
                 ordered = start.is_some();
-                list_idx = start.unwrap_or(0);
+                list_idx = start.unwrap_or(1);
             }
             Event::End(TagEnd::List(_)) => {
                 in_list = false;
             }
             Event::Start(Tag::Item) => {
-                text_buf.clear();
-            }
-            Event::Start(Tag::Emphasis) => {
-                push_inline_svg(
-                    in_quote,
-                    &mut quote_buf,
-                    &mut text_buf,
-                    "<tspan font-style=\"italic\">",
-                );
-            }
-            Event::End(TagEnd::Emphasis) => {
-                push_inline_svg(in_quote, &mut quote_buf, &mut text_buf, "</tspan>");
-            }
-            Event::Start(Tag::Strong) => {
-                push_inline_svg(
-                    in_quote,
-                    &mut quote_buf,
-                    &mut text_buf,
-                    "<tspan font-weight=\"700\">",
-                );
-            }
-            Event::End(TagEnd::Strong) => {
-                push_inline_svg(in_quote, &mut quote_buf, &mut text_buf, "</tspan>");
+                runs.clear();
             }
             Event::End(TagEnd::Item) => {
                 if in_list {
@@ -248,8 +269,20 @@ fn markdown_to_svg(markdown: &str) -> String {
                     } else {
                         "• ".to_string()
                     };
-                    b.add_list_item(&text_buf, &prefix);
-                    text_buf.clear();
+                    b.add_list_item(&runs, &prefix);
+                    runs.clear();
+                }
+            }
+            Event::Start(Tag::Emphasis) => style_stack.push(TextStyle::Italic),
+            Event::End(TagEnd::Emphasis) => {
+                if style_stack.len() > 1 {
+                    style_stack.pop();
+                }
+            }
+            Event::Start(Tag::Strong) => style_stack.push(TextStyle::Bold),
+            Event::End(TagEnd::Strong) => {
+                if style_stack.len() > 1 {
+                    style_stack.pop();
                 }
             }
 
@@ -257,27 +290,37 @@ fn markdown_to_svg(markdown: &str) -> String {
             Event::Text(t) => {
                 if in_code {
                     code_buf.push_str(&t);
+                } else if in_quote {
+                    push_text_run(&mut quote_runs, &t, current_style(&style_stack));
                 } else {
-                    push_inline_svg(in_quote, &mut quote_buf, &mut text_buf, &esc(&t));
+                    push_text_run(&mut runs, &t, current_style(&style_stack));
                 }
             }
             Event::Code(inline) => {
-                let formatted = format!("<tspan fill=\"{COLOR_SEED}\"> {}</tspan>", esc(&inline));
-                push_inline_svg(in_quote, &mut quote_buf, &mut text_buf, &formatted);
+                if in_quote {
+                    push_text_run(&mut quote_runs, format!(" {inline} "), TextStyle::Code);
+                } else {
+                    push_text_run(&mut runs, format!(" {inline} "), TextStyle::Code);
+                }
             }
             Event::InlineMath(math) => {
-                let marker = format!("\u{E000}{}\u{E001}", hex_encode(math.as_bytes()));
-                push_inline_svg(in_quote, &mut quote_buf, &mut text_buf, &marker);
+                if in_quote {
+                    push_text_run(&mut quote_runs, &math, TextStyle::Math);
+                } else {
+                    push_text_run(&mut runs, &math, TextStyle::Math);
+                }
             }
             Event::DisplayMath(math) => {
                 if in_quote {
-                    let formatted =
-                        format!("\n<tspan fill=\"#0f766e\">$$ {} $$</tspan>\n", esc(&math));
-                    quote_buf.push_str(&formatted);
+                    push_text_run(
+                        &mut quote_runs,
+                        format!("\n$$ {} $$\n", math.trim()),
+                        TextStyle::Math,
+                    );
                 } else {
-                    if has_visible_text(&text_buf) {
-                        b.add_paragraph(&text_buf);
-                        text_buf.clear();
+                    if runs_have_visible_text(&runs) {
+                        b.add_paragraph(&runs);
+                        runs.clear();
                     }
                     b.add_math_block(&math);
                     in_para = false;
@@ -287,14 +330,18 @@ fn markdown_to_svg(markdown: &str) -> String {
                 if in_code {
                     code_buf.push('\n');
                 } else if in_quote {
-                    quote_buf.push('\n');
+                    push_text_run(&mut quote_runs, "\n", current_style(&style_stack));
                 } else {
-                    text_buf.push('\n');
+                    push_text_run(&mut runs, "\n", current_style(&style_stack));
                 }
             }
             Event::TaskListMarker(checked) => {
                 let marker = if checked { "☑ " } else { "☐ " };
-                push_inline_svg(in_quote, &mut quote_buf, &mut text_buf, marker);
+                if in_quote {
+                    push_text_run(&mut quote_runs, marker, current_style(&style_stack));
+                } else {
+                    push_text_run(&mut runs, marker, current_style(&style_stack));
+                }
             }
             Event::Rule => {
                 b.add_rule();
@@ -306,12 +353,8 @@ fn markdown_to_svg(markdown: &str) -> String {
     b.build()
 }
 
-fn push_inline_svg(in_quote: bool, quote_buf: &mut String, text_buf: &mut String, svg: &str) {
-    if in_quote {
-        quote_buf.push_str(svg);
-    } else {
-        text_buf.push_str(svg);
-    }
+fn current_style(style_stack: &[TextStyle]) -> TextStyle {
+    style_stack.last().copied().unwrap_or(TextStyle::Normal)
 }
 
 // ── SVG → PNG (resvg pipeline) ────────────────────────────────────────────────
@@ -333,6 +376,7 @@ struct SvgBuilder {
     y: f32,
     w: u32,
     word_count: usize,
+    font_system: FontSystem,
 }
 
 impl SvgBuilder {
@@ -342,6 +386,7 @@ impl SvgBuilder {
             y: OUTER_PADDING + HEADER_TOP + HEADER_BOTTOM + 88.0,
             w: width,
             word_count,
+            font_system: FontSystem::new(),
         }
     }
 
@@ -350,22 +395,24 @@ impl SvgBuilder {
     }
 
     // ── Heading ───────────────────────────────────────────────────────
-    fn add_heading(&mut self, text: &str, font_size: f32, line_height: f32, level: u8) {
+    fn add_heading(&mut self, runs: &[TextRun], font_size: f32, line_height: f32, level: u8) {
         let fill = match level {
             1 => "#000000",
             2 => "#111111",
             _ => "#333333",
         };
         let available_w = self.text_area_width();
-        let lines = wrap_text(text, available_w, font_size);
+        let lines = layout_rich_lines(
+            &mut self.font_system,
+            runs,
+            available_w,
+            font_size,
+            line_height,
+        );
 
         if self.y > OUTER_PADDING + HEADER_TOP + HEADER_BOTTOM + 88.0 {
             self.y += if level == 1 { 18.0 } else { 42.0 };
         }
-
-        // Avoid skew transforms on tall SVGs because skewX uses the global coordinate
-        // system and can shift headings outside the left boundary as y grows.
-        let skew = "";
 
         // Vertical bar for H1 and H2
         if level <= 2 {
@@ -377,31 +424,44 @@ impl SvgBuilder {
             ));
         }
 
-        for line in &lines {
-            self.elems.push(format!(
-                "<text x=\"{PADDING}\" y=\"{}\" font-size=\"{font_size}\" fill=\"{fill}\" font-weight=\"700\" letter-spacing=\"0.02em\" {skew}>{}</text>",
+        for line_runs in &lines {
+            self.render_rich_line(
+                PADDING,
                 self.y,
-                line,
-            ));
+                font_size,
+                fill,
+                "font-weight=\"700\" letter-spacing=\"0.02em\"",
+                line_runs,
+            );
             self.y += line_height;
         }
         self.y += 12.0;
     }
 
     // ── Paragraph ─────────────────────────────────────────────────────
-    fn add_paragraph(&mut self, text: &str) {
+    fn add_paragraph(&mut self, runs: &[TextRun]) {
+        if !runs_have_visible_text(runs) {
+            return;
+        }
+
         let available_w = self.text_area_width();
-        let lines = wrap_text(text, available_w, BODY_FONT_SIZE);
+        let lines = layout_rich_lines(
+            &mut self.font_system,
+            runs,
+            available_w,
+            BODY_FONT_SIZE,
+            LINE_HEIGHT,
+        );
 
         self.y += 6.0;
-        for line in &lines {
-            self.render_inline_line(
+        for line_runs in &lines {
+            self.render_rich_line(
                 PADDING,
                 self.y,
                 BODY_FONT_SIZE,
                 COLOR_TEXT,
                 "letter-spacing=\"0.7\"",
-                line,
+                line_runs,
             );
             self.y += LINE_HEIGHT;
         }
@@ -409,13 +469,19 @@ impl SvgBuilder {
     }
 
     // ── List item ─────────────────────────────────────────────────────
-    fn add_list_item(&mut self, text: &str, prefix: &str) {
+    fn add_list_item(&mut self, runs: &[TextRun], prefix: &str) {
         let available_w = self.text_area_width() - 44.0;
         let is_ord = ordered_prefix(prefix);
-        let lines = wrap_text(text, available_w, BODY_FONT_SIZE);
+        let lines = layout_rich_lines(
+            &mut self.font_system,
+            runs,
+            available_w,
+            BODY_FONT_SIZE,
+            LINE_HEIGHT,
+        );
 
         self.y += 8.0;
-        for (i, line) in lines.iter().enumerate() {
+        for (i, line_runs) in lines.iter().enumerate() {
             let text_x = PADDING + 44.0;
             if i == 0 {
                 if is_ord {
@@ -435,13 +501,13 @@ impl SvgBuilder {
                     ));
                 }
             }
-            self.render_inline_line(
+            self.render_rich_line(
                 text_x,
                 self.y,
                 BODY_FONT_SIZE,
                 COLOR_TEXT,
                 "letter-spacing=\"0.7\"",
-                line,
+                line_runs,
             );
             self.y += LINE_HEIGHT;
         }
@@ -449,8 +515,8 @@ impl SvgBuilder {
     }
 
     // ── Block quote ───────────────────────────────────────────────────
-    fn add_blockquote(&mut self, text: &str) {
-        if text.is_empty() {
+    fn add_blockquote(&mut self, runs: &[TextRun]) {
+        if !runs_have_visible_text(runs) {
             return;
         }
 
@@ -459,11 +525,16 @@ impl SvgBuilder {
         let inner_x = PADDING + 44.0;
         let quote_pad_y = 36.0;
         let quote_w = self.text_area_width();
-        let raw_lines = wrap_text(text, quote_w - 88.0, BODY_FONT_SIZE);
-        let lines: Vec<String> = raw_lines
-            .into_iter()
-            .filter(|l| !l.trim().is_empty())
-            .collect();
+        let lines: Vec<Vec<TextRun>> = layout_rich_lines(
+            &mut self.font_system,
+            runs,
+            quote_w - 88.0,
+            BODY_FONT_SIZE,
+            LINE_HEIGHT,
+        )
+        .into_iter()
+        .filter(|line| runs_have_visible_text(line))
+        .collect();
 
         if lines.is_empty() {
             return;
@@ -486,14 +557,14 @@ impl SvgBuilder {
 
         // 3. 绘制文字
         self.y += quote_pad_y + BODY_FONT_SIZE;
-        for line in &lines {
-            self.render_inline_line(
+        for line_runs in &lines {
+            self.render_rich_line(
                 inner_x,
                 self.y,
                 BODY_FONT_SIZE,
                 "#374151",
                 "font-style=\"italic\" letter-spacing=\"0.7\"",
-                line,
+                line_runs,
             );
             self.y += LINE_HEIGHT;
         }
@@ -503,33 +574,24 @@ impl SvgBuilder {
     }
 
     // ── Inline rich text line ──────────────────────────────────────────
-    fn render_inline_line(
+    fn render_rich_line(
         &mut self,
         x: f32,
         baseline_y: f32,
         font_size: f32,
         fill: &str,
         attrs: &str,
-        line: &str,
+        runs: &[TextRun],
     ) {
         let mut current_x = x;
-        let mut rest = line;
-        let start_marker = '\u{E000}';
-        let end_marker = '\u{E001}';
 
-        while let Some(start) = rest.find(start_marker) {
-            let text = &rest[..start];
-            current_x += self.render_text_run(current_x, baseline_y, font_size, fill, attrs, text);
+        for run in runs {
+            if run.text.is_empty() {
+                continue;
+            }
 
-            let after_start = &rest[start + start_marker.len_utf8()..];
-            let Some(end) = after_start.find(end_marker) else {
-                self.render_text_run(current_x, baseline_y, font_size, fill, attrs, after_start);
-                return;
-            };
-
-            let hex = &after_start[..end];
-            if let Some(latex) = hex_decode_string(hex) {
-                if let Some((svg, w, h)) = inline_math_svg(&latex, font_size) {
+            if run.style == TextStyle::Math {
+                if let Some((svg, w, h)) = inline_math_svg(&run.text, font_size) {
                     let y = baseline_y - h * 0.78;
                     self.elems.push(format!(
                         "<svg x=\"{current_x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" viewBox=\"{}\" color=\"#0f766e\">{}</svg>",
@@ -537,36 +599,39 @@ impl SvgBuilder {
                     ));
                     current_x += w + font_size * 0.18;
                 } else {
-                    let fallback = format!("<tspan fill=\"#0f766e\">${}$</tspan>", esc(&latex));
-                    current_x += self
-                        .render_text_run(current_x, baseline_y, font_size, fill, attrs, &fallback);
+                    let fallback = TextRun::new(format!("${}$", run.text), TextStyle::Math);
+                    current_x += self.render_text_run_styled(
+                        current_x, baseline_y, font_size, fill, attrs, &fallback,
+                    );
                 }
+                continue;
             }
 
-            rest = &after_start[end + end_marker.len_utf8()..];
+            current_x +=
+                self.render_text_run_styled(current_x, baseline_y, font_size, fill, attrs, run);
         }
-
-        self.render_text_run(current_x, baseline_y, font_size, fill, attrs, rest);
     }
 
-    fn render_text_run(
+    fn render_text_run_styled(
         &mut self,
         x: f32,
         baseline_y: f32,
         font_size: f32,
         fill: &str,
         attrs: &str,
-        text: &str,
+        run: &TextRun,
     ) -> f32 {
-        if !has_visible_text(text) {
+        if run.text.is_empty() {
             return 0.0;
         }
 
+        let (run_fill, style_attrs, text) = svg_style_for_run(run, fill);
         self.elems.push(format!(
-            "<text x=\"{x}\" y=\"{baseline_y}\" font-size=\"{font_size}\" fill=\"{fill}\" {attrs}>{text}</text>"
+            "<text x=\"{x}\" y=\"{baseline_y}\" font-size=\"{font_size}\" fill=\"{run_fill}\" {attrs} {style_attrs}>{}</text>",
+            esc(&text)
         ));
 
-        visible_units(text) * font_size
+        measure_runs_width(&mut self.font_system, std::slice::from_ref(run), font_size)
     }
 
     // ── Math block (MathJax-rendered SVG) ──────────────────────────────
@@ -578,22 +643,22 @@ impl SvgBuilder {
         self.y += 28.0;
         let area_w = self.text_area_width();
         let max_w = area_w - 48.0;
-        let fallback = format!(
-            "<tspan fill=\"#0f766e\">$$ {} $$</tspan>",
-            esc(latex.trim())
-        );
+        let fallback_runs = [TextRun::new(
+            format!("$$ {} $$", latex.trim()),
+            TextStyle::Math,
+        )];
 
         let options = mathjax_svg_rs::Options {
             font_size: 24.0,
             horizontal_align: mathjax_svg_rs::HorizontalAlign::Center,
         };
         let Ok(math_svg) = render_math_svg_cached(latex.trim(), &options) else {
-            self.add_paragraph(&fallback);
+            self.add_paragraph(&fallback_runs);
             return;
         };
 
         let Some((vb_x, vb_y, vb_w, vb_h)) = svg_view_box(&math_svg) else {
-            self.add_paragraph(&fallback);
+            self.add_paragraph(&fallback_runs);
             return;
         };
 
@@ -614,7 +679,7 @@ impl SvgBuilder {
 
     // ── Code block ────────────────────────────────────────────────────
     fn add_code_block(&mut self, code: &str, language: &str) {
-        self.y += 26.0;
+        self.y += 16.0;
 
         let pad_x = 30.0;
         let chrome_h = 50.0;
@@ -622,9 +687,11 @@ impl SvgBuilder {
         let content_y_offset = 6.0;
         let block_w = self.text_area_width();
         let code_area_w = block_w - pad_x * 2.0;
-        let max_code_units = code_area_w / (CODE_FONT_SIZE * 0.58);
-        let wrapped_code = wrap_code_lines(code, max_code_units);
-        let highlighted = highlight_code(&wrapped_code, language);
+        let highlighted = wrap_highlighted_code_lines(
+            highlight_code(code, language),
+            code_area_w,
+            CODE_FONT_SIZE,
+        );
         let block_h = highlighted.len() as f32 * CODE_LH + chrome_h + pad_bottom + content_y_offset;
 
         // 1. Code block container
@@ -661,7 +728,7 @@ impl SvgBuilder {
                 .collect();
 
             self.elems.push(format!(
-                "<text x=\"{}\" y=\"{current_code_y}\" font-size=\"{CODE_FONT_SIZE}\" xml:space=\"preserve\">{tspans}</text>",
+                "<text x=\"{}\" y=\"{current_code_y}\" font-size=\"{CODE_FONT_SIZE}\" font-family=\"LXGW WenKai Mono, monospace\" xml:space=\"preserve\">{tspans}</text>",
                 PADDING + pad_x,
             ));
 
@@ -828,123 +895,179 @@ fn highlight_code(code: &str, language: &str) -> Vec<Vec<(String, String)>> {
 //  Text helpers
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Break `text` into lines that fit the estimated visual width.
-///
-/// The input may contain trusted inline SVG `<tspan>` fragments generated by the
-/// Markdown parser. Tags are ignored for width calculation and are kept balanced
-/// when a visual line wraps.
-fn wrap_text(text: &str, max_pixel_width: f32, font_size: f32) -> Vec<String> {
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-
+fn layout_rich_lines(
+    font_system: &mut FontSystem,
+    runs: &[TextRun],
+    max_width: f32,
+    font_size: f32,
+    line_height: f32,
+) -> Vec<Vec<TextRun>> {
+    let logical_lines = split_runs_on_newlines(runs);
     let mut out = Vec::new();
 
-    for para in text.split('\n') {
-        if para.is_empty() {
-            out.push(String::new());
+    for logical_runs in logical_lines {
+        if logical_runs.is_empty() || !runs_have_visible_text(&logical_runs) {
+            out.push(Vec::new());
             continue;
         }
 
-        let mut line = String::new();
-        let mut current_line_width = 0.0f32;
-        let mut open_tags: Vec<String> = Vec::new();
-        let chars: Vec<char> = para.chars().collect();
-        let mut i = 0;
-        let start_marker = '\u{E000}';
-        let end_marker = '\u{E001}';
+        let metrics = Metrics::new(font_size, line_height);
+        let mut buffer = Buffer::new(font_system, metrics);
+        buffer.set_size(font_system, Some(max_width), None);
 
-        while i < chars.len() {
-            if chars[i] == start_marker {
-                if let Some(end) = chars[i + 1..].iter().position(|&ch| ch == end_marker) {
-                    let marker: String = chars[i..=i + end + 1].iter().collect();
-                    let hex: String = chars[i + 1..i + 1 + end].iter().collect();
-                    let marker_width = hex_decode_string(&hex)
-                        .map(|latex| {
-                            latex.chars().map(char_visual_width).sum::<f32>() * font_size * 0.9
-                        })
-                        .unwrap_or(4.0 * font_size);
+        let mut full_text = String::new();
+        let mut byte_styles = Vec::new();
+        let mut spans: Vec<(&str, Attrs)> = Vec::new();
 
-                    if current_line_width + marker_width > max_pixel_width
-                        && has_visible_text(&line)
-                    {
-                        let mut finished = line.trim_end().to_string();
-                        for _ in open_tags.iter().rev() {
-                            finished.push_str("</tspan>");
-                        }
-                        out.push(finished);
-
-                        line.clear();
-                        for tag in &open_tags {
-                            line.push_str(tag);
-                        }
-                        current_line_width = 0.0;
-                    }
-
-                    line.push_str(&marker);
-                    current_line_width += marker_width;
-                    i += end + 2;
-                    continue;
-                }
-            }
-
-            if chars[i] == '<' {
-                if let Some(end) = chars[i..].iter().position(|&ch| ch == '>') {
-                    let tag: String = chars[i..=i + end].iter().collect();
-                    if tag.starts_with("<tspan") && !tag.ends_with("/>") {
-                        open_tags.push(tag.clone());
-                    } else if tag == "</tspan>" {
-                        open_tags.pop();
-                    }
-                    line.push_str(&tag);
-                    i += end + 1;
-                    continue;
-                }
-            }
-
-            let ch = chars[i];
-            let ch_width = char_visual_width(ch) * font_size;
-
-            if ch.is_whitespace() {
-                if !line.ends_with(' ') && has_visible_text(&line) {
-                    line.push(' ');
-                    current_line_width += ch_width;
-                }
-                i += 1;
-                continue;
-            }
-
-            if current_line_width + ch_width > max_pixel_width
-                && has_visible_text(&line)
-                && !is_no_line_start_punctuation(ch)
-            {
-                let mut finished = line.trim_end().to_string();
-                for _ in open_tags.iter().rev() {
-                    finished.push_str("</tspan>");
-                }
-                out.push(finished);
-
-                line.clear();
-                for tag in &open_tags {
-                    line.push_str(tag);
-                }
-                current_line_width = 0.0;
-            }
-
-            line.push(ch);
-            current_line_width += ch_width;
-            i += 1;
+        for run in &logical_runs {
+            let start = full_text.len();
+            full_text.push_str(&run.text);
+            let end = full_text.len();
+            byte_styles.push((start, end, run.style));
         }
 
-        if has_visible_text(&line) {
-            out.push(line.trim_end().to_string());
+        for (start, end, style) in &byte_styles {
+            spans.push((&full_text[*start..*end], attrs_for_style(*style)));
+        }
+
+        buffer.set_rich_text(
+            font_system,
+            spans,
+            attrs_for_style(TextStyle::Normal),
+            Shaping::Advanced,
+        );
+
+        for layout_run in buffer.layout_runs() {
+            let Some(start) = layout_run.glyphs.iter().map(|glyph| glyph.start).min() else {
+                out.push(Vec::new());
+                continue;
+            };
+            let Some(end) = layout_run.glyphs.iter().map(|glyph| glyph.end).max() else {
+                out.push(Vec::new());
+                continue;
+            };
+
+            out.push(slice_runs_by_byte_range(
+                &full_text,
+                &byte_styles,
+                start,
+                end,
+            ));
         }
     }
 
     if out.is_empty() {
-        out.push(String::new());
+        out.push(Vec::new());
     }
+
     out
+}
+
+fn split_runs_on_newlines(runs: &[TextRun]) -> Vec<Vec<TextRun>> {
+    let mut lines = vec![Vec::new()];
+
+    for run in runs {
+        for segment in run.text.split_inclusive('\n') {
+            let text = segment.strip_suffix('\n').unwrap_or(segment);
+            if !text.is_empty() {
+                push_text_run(lines.last_mut().expect("line exists"), text, run.style);
+            }
+            if segment.ends_with('\n') {
+                lines.push(Vec::new());
+            }
+        }
+    }
+
+    lines
+}
+
+fn slice_runs_by_byte_range(
+    full_text: &str,
+    byte_styles: &[(usize, usize, TextStyle)],
+    start: usize,
+    end: usize,
+) -> Vec<TextRun> {
+    let mut runs = Vec::new();
+
+    for (run_start, run_end, style) in byte_styles {
+        let s = start.max(*run_start);
+        let e = end.min(*run_end);
+        if s >= e {
+            continue;
+        }
+        push_text_run(&mut runs, &full_text[s..e], *style);
+    }
+
+    runs
+}
+
+fn measure_runs_width(font_system: &mut FontSystem, runs: &[TextRun], font_size: f32) -> f32 {
+    if !runs_have_visible_text(runs) {
+        return 0.0;
+    }
+
+    let metrics = Metrics::new(font_size, font_size * 1.4);
+    let mut buffer = Buffer::new(font_system, metrics);
+    buffer.set_size(font_system, None, None);
+
+    let mut full_text = String::new();
+    let mut ranges = Vec::new();
+    let mut spans: Vec<(&str, Attrs)> = Vec::new();
+
+    for run in runs {
+        let start = full_text.len();
+        full_text.push_str(&run.text);
+        ranges.push((start, full_text.len(), run.style));
+    }
+    for (start, end, style) in ranges {
+        spans.push((&full_text[start..end], attrs_for_style(style)));
+    }
+
+    buffer.set_rich_text(
+        font_system,
+        spans,
+        attrs_for_style(TextStyle::Normal),
+        Shaping::Advanced,
+    );
+
+    buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0f32, f32::max)
+}
+
+fn attrs_for_style(style: TextStyle) -> Attrs<'static> {
+    let mut attrs = Attrs::new().family(Family::Name("LXGW WenKai"));
+    match style {
+        TextStyle::Bold => attrs = attrs.weight(Weight::BOLD),
+        TextStyle::Italic => attrs = attrs.style(Style::Italic),
+        TextStyle::Code => attrs = attrs.family(Family::Name("LXGW WenKai Mono")),
+        TextStyle::Math => attrs = attrs.family(Family::Serif),
+        TextStyle::Normal => {}
+    }
+    attrs
+}
+
+fn svg_style_for_run(run: &TextRun, default_fill: &str) -> (String, &'static str, String) {
+    match run.style {
+        TextStyle::Normal => (default_fill.to_string(), "", run.text.clone()),
+        TextStyle::Bold => (
+            default_fill.to_string(),
+            "font-weight=\"700\"",
+            run.text.clone(),
+        ),
+        TextStyle::Italic => (
+            default_fill.to_string(),
+            "font-style=\"italic\"",
+            run.text.clone(),
+        ),
+        TextStyle::Code => (
+            COLOR_SEED.to_string(),
+            "font-family=\"LXGW WenKai Mono, monospace\"",
+            run.text.clone(),
+        ),
+        TextStyle::Math => ("#0f766e".to_string(), "", format!("${}$", run.text)),
+    }
 }
 
 struct InlineMathSvg {
@@ -1005,41 +1128,6 @@ fn inline_math_svg(latex: &str, font_size: f32) -> Option<(InlineMathSvg, f32, f
     ))
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
-fn hex_decode_string(hex: &str) -> Option<String> {
-    if hex.len() % 2 != 0 {
-        return None;
-    }
-
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    let mut chars = hex.bytes();
-    while let (Some(hi), Some(lo)) = (chars.next(), chars.next()) {
-        let hi = hex_value(hi)?;
-        let lo = hex_value(lo)?;
-        bytes.push((hi << 4) | lo);
-    }
-
-    String::from_utf8(bytes).ok()
-}
-
-fn hex_value(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
 fn svg_view_box(svg: &str) -> Option<(f32, f32, f32, f32)> {
     let marker = "viewBox=\"";
     let start = svg.find(marker)? + marker.len();
@@ -1065,103 +1153,107 @@ fn svg_inner_content(svg: &str) -> Option<&str> {
     }
 }
 
-fn visible_units(s: &str) -> f32 {
-    let mut units = 0.0;
-    let mut in_tag = false;
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
+fn wrap_highlighted_code_lines(
+    highlighted: Vec<Vec<(String, String)>>,
+    max_pixel_width: f32,
+    font_size: f32,
+) -> Vec<Vec<(String, String)>> {
+    let mut out = Vec::new();
 
-    while i < chars.len() {
-        match chars[i] {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            '\u{E000}' => {
-                if let Some(end) = chars[i + 1..].iter().position(|&ch| ch == '\u{E001}') {
-                    let hex: String = chars[i + 1..i + 1 + end].iter().collect();
-                    if let Some(latex) = hex_decode_string(&hex) {
-                        units += latex.chars().map(visual_units).sum::<f32>() * 0.9;
-                    }
-                    i += end + 2;
-                    continue;
-                }
-            }
-            ch if !in_tag => units += visual_units(ch),
-            _ => {}
-        }
-        i += 1;
-    }
-
-    units
-}
-
-fn has_visible_text(s: &str) -> bool {
-    let mut in_tag = false;
-    for ch in s.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag && !ch.is_whitespace() => return true,
-            _ => {}
-        }
-    }
-    false
-}
-
-fn wrap_code_lines(code: &str, max_units: f32) -> String {
-    let mut out = String::new();
-
-    for raw_line in code.lines() {
-        let indent: String = raw_line
+    for tokens in highlighted {
+        let plain_line: String = tokens.iter().map(|(_, text)| text.as_str()).collect();
+        let indent: String = plain_line
+            .replace('\t', "    ")
             .chars()
             .take_while(|ch| ch.is_whitespace())
             .collect();
-        let continuation_indent = format!("{indent}  ");
-        let mut line = String::new();
-        let mut units = 0.0f32;
+        let continuation_width = code_text_width(&indent, font_size);
 
-        for ch in raw_line.chars() {
-            let ch_units = visual_units(ch);
-            if units + ch_units > max_units && !line.trim().is_empty() {
-                out.push_str(line.trim_end());
-                out.push('\n');
-                line.clear();
-                line.push_str(&continuation_indent);
-                units = visible_units(&continuation_indent);
+        let mut line_tokens: Vec<(String, String)> = Vec::new();
+        let mut line_plain = String::new();
+        let mut width = 0.0f32;
+
+        for (color, text) in tokens {
+            for ch in text.chars() {
+                let text = if ch == '\t' {
+                    "    ".to_string()
+                } else {
+                    ch.to_string()
+                };
+                let text_width = code_text_width(&text, font_size);
+
+                if width + text_width > max_pixel_width && !line_plain.trim().is_empty() {
+                    trim_code_line_end(&mut line_tokens, &mut line_plain);
+                    out.push(line_tokens);
+
+                    line_tokens = Vec::new();
+                    line_plain = String::new();
+                    width = 0.0;
+
+                    if !indent.is_empty() {
+                        push_code_token(&mut line_tokens, color.clone(), indent.clone());
+                        line_plain.push_str(&indent);
+                        width = continuation_width;
+                    }
+                }
+
+                push_code_token(&mut line_tokens, color.clone(), text.clone());
+                line_plain.push_str(&text);
+                width += text_width;
             }
-
-            line.push(ch);
-            units += ch_units;
         }
 
-        out.push_str(line.trim_end());
-        out.push('\n');
+        trim_code_line_end(&mut line_tokens, &mut line_plain);
+        out.push(line_tokens);
     }
 
-    if out.ends_with('\n') {
-        out.pop();
-    }
     out
 }
 
-fn visual_units(ch: char) -> f32 {
-    char_visual_width(ch)
+fn push_code_token(tokens: &mut Vec<(String, String)>, color: String, text: String) {
+    if text.is_empty() {
+        return;
+    }
+
+    if let Some((last_color, last_text)) = tokens.last_mut() {
+        if *last_color == color {
+            last_text.push_str(&text);
+            return;
+        }
+    }
+
+    tokens.push((color, text));
 }
 
-fn char_visual_width(ch: char) -> f32 {
-    if (ch as u32) < 32 {
-        0.0
-    } else if is_ascii_printable(ch) {
-        match ch {
-            ' ' => 0.38,
-            'A'..='Z' => 0.62,
-            'a'..='z' | '0'..='9' => 0.54,
-            _ => 0.54,
+fn trim_code_line_end(tokens: &mut Vec<(String, String)>, plain: &mut String) {
+    while plain.ends_with(' ') {
+        plain.pop();
+        if let Some((_, text)) = tokens.last_mut() {
+            text.pop();
+            if text.is_empty() {
+                tokens.pop();
+            }
+        } else {
+            break;
         }
+    }
+}
+
+fn code_text_width(text: &str, font_size: f32) -> f32 {
+    text.chars().map(|ch| code_char_width(ch, font_size)).sum()
+}
+
+fn code_char_width(ch: char, font_size: f32) -> f32 {
+    let unit = if ch == ' ' {
+        0.5
+    } else if is_ascii_printable(ch) {
+        0.62
     } else if is_cjk_punctuation(ch) || is_cjk(ch) {
-        1.02
+        1.0
     } else {
         0.9
-    }
+    };
+    unit * font_size
 }
 
 fn is_ascii_printable(ch: char) -> bool {
@@ -1174,14 +1266,6 @@ fn is_cjk_punctuation(ch: char) -> bool {
 
 fn is_cjk(ch: char) -> bool {
     matches!(ch as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF)
-}
-
-fn is_no_line_start_punctuation(ch: char) -> bool {
-    is_cjk_punctuation(ch)
-        || matches!(
-            ch,
-            ',' | '.' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '\'' | '"'
-        )
 }
 
 /// Returns true for ordered list prefixes such as "1. ".
