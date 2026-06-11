@@ -538,14 +538,13 @@ impl SvgBuilder {
 
     // ── Horizontal rule ───────────────────────────────────────────────
     fn add_rule(&mut self) {
-        self.y += 40.0;
         self.elems.push(format!(
             "<line x1=\"{PADDING}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{COLOR_BORDER}\" stroke-width=\"2\" stroke-dasharray=\"8 8\"/>",
             self.y,
             self.w as f32 - PADDING,
             self.y,
         ));
-        self.y += 48.0;
+        self.y += 64.0;
     }
 
     // ── Table ────────────────────────────────────────────────────────
@@ -824,7 +823,6 @@ impl SvgBuilder {
 
         ctx.quote_depth += 1;
 
-        self.y += 28.0;
         let quote_w = self.text_area_width();
         let quote_pad_y = 36.0;
         let block_y = self.y;
@@ -849,7 +847,7 @@ impl SvgBuilder {
             "<rect x=\"{PADDING}\" y=\"{block_y}\" width=\"{quote_w}\" height=\"{block_h}\" rx=\"24\" fill=\"#f8fafc\" stroke=\"#ffffff\" stroke-width=\"1\"/>"
         );
 
-        self.y = block_y + block_h + 40.0;
+        self.y = block_y + block_h + LINE_HEIGHT;
         ctx.quote_depth -= 1;
     }
 
