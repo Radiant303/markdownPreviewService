@@ -6,3 +6,4 @@ pub(crate) fn esc(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
+

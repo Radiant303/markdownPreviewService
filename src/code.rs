@@ -51,17 +51,21 @@ pub(crate) fn wrap_highlighted_code_lines(
         let mut line_tokens: Vec<(String, String)> = Vec::new();
         let mut line_plain = String::new();
         let mut width = 0.0f32;
+        let mut current_text = String::new();
 
         for (color, text) in tokens {
             for ch in text.chars() {
-                let text = if ch == '\t' {
-                    "    ".to_string()
+                let mut buf = [0; 4];
+                let (ch_str, text_width) = if ch == '\t' {
+                    ("    ", code_char_width(' ', font_size) * 4.0)
                 } else {
-                    ch.to_string()
+                    (ch.encode_utf8(&mut buf) as &str, code_char_width(ch, font_size))
                 };
-                let text_width = code_text_width(&text, font_size);
 
                 if width + text_width > max_pixel_width && !line_plain.trim().is_empty() {
+                    if !current_text.is_empty() {
+                        push_code_token(&mut line_tokens, color.clone(), std::mem::take(&mut current_text));
+                    }
                     trim_code_line_end(&mut line_tokens, &mut line_plain);
                     out.push(line_tokens);
 
@@ -76,9 +80,13 @@ pub(crate) fn wrap_highlighted_code_lines(
                     }
                 }
 
-                push_code_token(&mut line_tokens, color.clone(), text.clone());
-                line_plain.push_str(&text);
+                current_text.push_str(ch_str);
+                line_plain.push_str(ch_str);
                 width += text_width;
+            }
+
+            if !current_text.is_empty() {
+                push_code_token(&mut line_tokens, color, std::mem::take(&mut current_text));
             }
         }
 

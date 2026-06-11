@@ -30,6 +30,7 @@ pub(crate) static FONT_SYSTEM: LazyLock<Mutex<FontSystem>> = LazyLock::new(|| {
     Mutex::new(font_system)
 });
 
+
 /// Build usvg options once with bundled LXGW fonts plus system fallback fonts.
 pub(crate) static USVG_OPTS: LazyLock<usvg::Options<'static>> = LazyLock::new(|| {
     let mut db = fontdb::Database::new();

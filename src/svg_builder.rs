@@ -4,7 +4,7 @@ use crate::constants::*;
 use crate::math::{inline_math_svg, render_math_svg_cached, svg_inner_content, svg_view_box};
 use crate::text::{
     layout_rich_lines, measure_runs_width, push_text_run, runs_have_visible_text,
-    svg_tspan_for_run, TextRun, TextStyle,
+    svg_tspan_for_run, LayoutLine, TextRun, TextStyle,
 };
 use crate::util::esc;
 
@@ -50,7 +50,7 @@ fn node_has_visible_content(node: &Node) -> bool {
 }
 
 struct TableCellLayout {
-    lines: Vec<Vec<TextRun>>,
+    lines: Vec<LayoutLine>,
     line_widths: Vec<f32>,
     align: TableAlignment,
 }
@@ -168,17 +168,17 @@ fn layout_table(
 
         for (idx, cell) in row.into_iter().enumerate() {
             let content_w = (col_widths[idx] - TABLE_CELL_PAD_X * 2.0).max(12.0);
-            let lines: Vec<Vec<TextRun>> = if runs_have_visible_text(&cell.runs) {
+            let lines: Vec<LayoutLine> = if runs_have_visible_text(&cell.runs) {
                 layout_rich_lines(&cell.runs, content_w, TABLE_FONT_SIZE, TABLE_LINE_HEIGHT)
                     .into_iter()
-                    .filter(|line| runs_have_visible_text(line))
+                    .filter(|line| runs_have_visible_text(&line.runs))
                     .collect()
             } else {
                 Vec::new()
             };
             let line_widths = lines
                 .iter()
-                .map(|line| measure_runs_width(line, TABLE_FONT_SIZE))
+                .map(|line| line.width)
                 .collect::<Vec<_>>();
             row_h =
                 row_h.max(lines.len().max(1) as f32 * TABLE_LINE_HEIGHT + TABLE_CELL_PAD_Y * 2.0);
@@ -279,14 +279,14 @@ impl SvgBuilder {
             ));
         }
 
-        for line_runs in &lines {
+        for line in &lines {
             self.render_rich_line(
                 PADDING,
                 self.y,
                 font_size,
                 fill,
                 "font-weight=\"700\" letter-spacing=\"0.02em\"",
-                line_runs,
+                &line.runs,
             );
             self.y += line_height;
         }
@@ -303,14 +303,14 @@ impl SvgBuilder {
         let lines = layout_rich_lines(runs, available_w, BODY_FONT_SIZE, LINE_HEIGHT);
 
         self.y += 6.0;
-        for line_runs in &lines {
+        for line in &lines {
             self.render_rich_line(
                 PADDING,
                 self.y,
                 BODY_FONT_SIZE,
                 COLOR_TEXT,
                 "letter-spacing=\"0.7\"",
-                line_runs,
+                &line.runs,
             );
             self.y += LINE_HEIGHT;
         }
@@ -612,7 +612,7 @@ impl SvgBuilder {
                     + (row_h - TABLE_CELL_PAD_Y * 2.0 - text_h) / 2.0
                     + TABLE_FONT_SIZE;
 
-                for (line_runs, line_w) in cell.lines.iter().zip(&cell.line_widths) {
+                for (line, line_w) in cell.lines.iter().zip(&cell.line_widths) {
                     let text_x = aligned_table_text_x(
                         cell_x + TABLE_CELL_PAD_X,
                         text_w,
@@ -630,7 +630,7 @@ impl SvgBuilder {
                         } else {
                             "letter-spacing=\"0.35\""
                         },
-                        line_runs,
+                        &line.runs,
                     );
                     baseline_y += TABLE_LINE_HEIGHT;
                 }
@@ -847,20 +847,20 @@ impl SvgBuilder {
                     return;
                 }
 
-                let lines: Vec<Vec<TextRun>> =
+                let lines: Vec<LayoutLine> =
                     layout_rich_lines(&runs, available_w, BODY_FONT_SIZE, LINE_HEIGHT)
                         .into_iter()
-                        .filter(|line| runs_have_visible_text(line))
+                        .filter(|line| runs_have_visible_text(&line.runs))
                         .collect();
 
-                for line_runs in &lines {
+                for line in &lines {
                     self.render_rich_line(
                         x,
                         self.y,
                         BODY_FONT_SIZE,
                         "#374151",
                         "font-style=\"italic\" letter-spacing=\"0.7\"",
-                        line_runs,
+                        &line.runs,
                     );
                     self.y += LINE_HEIGHT;
                 }
@@ -939,14 +939,14 @@ impl SvgBuilder {
                         ));
                     }
 
-                    for line_runs in &lines {
+                    for line in &lines {
                         self.render_rich_line(
                             content_x,
                             self.y,
                             BODY_FONT_SIZE,
                             COLOR_TEXT,
                             "letter-spacing=\"0.7\"",
-                            line_runs,
+                            &line.runs,
                         );
                         self.y += LINE_HEIGHT;
                     }
@@ -998,14 +998,14 @@ impl SvgBuilder {
                     2 => "#111111",
                     _ => "#333333",
                 };
-                for line_runs in &lines {
+                for line in &lines {
                     self.render_rich_line(
                         x,
                         self.y,
                         font_size,
                         fill,
                         "font-weight=\"700\" letter-spacing=\"0.02em\"",
-                        line_runs,
+                        &line.runs,
                     );
                     self.y += line_height;
                 }
@@ -1018,14 +1018,14 @@ impl SvgBuilder {
                 }
                 let lines = layout_rich_lines(&runs, available_w, BODY_FONT_SIZE, LINE_HEIGHT);
                 self.y += 6.0;
-                for line_runs in &lines {
+                for line in &lines {
                     self.render_rich_line(
                         x,
                         self.y,
                         BODY_FONT_SIZE,
                         COLOR_TEXT,
                         "letter-spacing=\"0.7\"",
-                        line_runs,
+                        &line.runs,
                     );
                     self.y += LINE_HEIGHT;
                 }

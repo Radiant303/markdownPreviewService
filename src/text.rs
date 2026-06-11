@@ -46,19 +46,28 @@ pub(crate) fn runs_have_visible_text(runs: &[TextRun]) -> bool {
     runs.iter().any(|run| !run.text.trim().is_empty())
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct LayoutLine {
+    pub(crate) runs: Vec<TextRun>,
+    pub(crate) width: f32,
+}
+
 pub(crate) fn layout_rich_lines(
     runs: &[TextRun],
     max_width: f32,
     font_size: f32,
     line_height: f32,
-) -> Vec<Vec<TextRun>> {
+) -> Vec<LayoutLine> {
     let mut font_system = FONT_SYSTEM.lock().expect("font system mutex poisoned");
     let logical_lines = split_runs_on_newlines(runs);
     let mut out = Vec::new();
 
     for logical_runs in logical_lines {
         if logical_runs.is_empty() || !runs_have_visible_text(&logical_runs) {
-            out.push(Vec::new());
+            out.push(LayoutLine {
+                runs: Vec::new(),
+                width: 0.0,
+            });
             continue;
         }
 
@@ -90,25 +99,36 @@ pub(crate) fn layout_rich_lines(
 
         for layout_run in buffer.layout_runs() {
             let Some(start) = layout_run.glyphs.iter().map(|glyph| glyph.start).min() else {
-                out.push(Vec::new());
+                out.push(LayoutLine {
+                    runs: Vec::new(),
+                    width: 0.0,
+                });
                 continue;
             };
             let Some(end) = layout_run.glyphs.iter().map(|glyph| glyph.end).max() else {
-                out.push(Vec::new());
+                out.push(LayoutLine {
+                    runs: Vec::new(),
+                    width: 0.0,
+                });
                 continue;
             };
 
-            out.push(slice_runs_by_byte_range(
+            let runs = slice_runs_by_byte_range(
                 &full_text,
                 &byte_styles,
                 start,
                 end,
-            ));
+            );
+            let width = layout_run.line_w;
+            out.push(LayoutLine { runs, width });
         }
     }
 
     if out.is_empty() {
-        out.push(Vec::new());
+        out.push(LayoutLine {
+            runs: Vec::new(),
+            width: 0.0,
+        });
     }
 
     out
