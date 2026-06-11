@@ -15,6 +15,7 @@ pub(crate) enum TextStyle {
 pub(crate) struct TextRun {
     pub(crate) text: String,
     pub(crate) style: TextStyle,
+    pub(crate) math_scale: Option<f32>,
 }
 
 impl TextRun {
@@ -22,6 +23,7 @@ impl TextRun {
         Self {
             text: text.into(),
             style,
+            math_scale: None,
         }
     }
 }
@@ -32,10 +34,12 @@ pub(crate) fn push_text_run(runs: &mut Vec<TextRun>, text: impl AsRef<str>, styl
         return;
     }
 
-    if let Some(last) = runs.last_mut() {
-        if last.style == style {
-            last.text.push_str(text);
-            return;
+    if style != TextStyle::Math {
+        if let Some(last) = runs.last_mut() {
+            if last.style == style {
+                last.text.push_str(text);
+                return;
+            }
         }
     }
 

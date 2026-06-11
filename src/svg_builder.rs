@@ -63,21 +63,30 @@ fn layout_rich_lines_with_atomic_math(
 
         for run in logical_runs {
             if run.style == TextStyle::Math {
-                let run_width = math_run_width(&run, font_size);
-                if line_width + run_width > max_width && runs_have_visible_text(&line_runs) {
-                    push_layout_line(&mut out, std::mem::take(&mut line_runs), font_size);
-                    line_width = 0.0;
-                }
+                for (math_run, run_width) in math_layout_runs(&run, font_size, max_width) {
+                    if line_width + run_width > max_width && runs_have_visible_text(&line_runs) {
+                        push_layout_line(
+                            &mut out,
+                            std::mem::take(&mut line_runs),
+                            font_size,
+                        );
+                        line_width = 0.0;
+                    }
 
-                line_runs.push(run);
-                line_width += run_width;
+                    line_runs.push(math_run);
+                    line_width += run_width;
+                }
                 continue;
             }
 
             for ch in run.text.chars() {
                 let ch_width = text_char_width(ch, run.style, font_size, &mut char_widths);
                 if line_width + ch_width > max_width && runs_have_visible_text(&line_runs) {
-                    push_layout_line(&mut out, std::mem::take(&mut line_runs), font_size);
+                    push_layout_line(
+                        &mut out,
+                        std::mem::take(&mut line_runs),
+                        font_size,
+                    );
                     line_width = 0.0;
                 }
 
@@ -100,7 +109,11 @@ fn layout_rich_lines_with_atomic_math(
     out
 }
 
-fn push_layout_line(out: &mut Vec<LayoutLine>, runs: Vec<TextRun>, font_size: f32) {
+fn push_layout_line(
+    out: &mut Vec<LayoutLine>,
+    runs: Vec<TextRun>,
+    font_size: f32,
+) {
     let width = measure_line_width_with_atomic_math(&runs, font_size);
     out.push(LayoutLine { runs, width });
 }
@@ -129,7 +142,7 @@ fn measure_line_width_with_atomic_math(runs: &[TextRun], font_size: f32) -> f32 
 }
 
 fn math_run_width(run: &TextRun, font_size: f32) -> f32 {
-    inline_math_svg(&run.text, font_size)
+    inline_math_render(&run.text, font_size, run.math_scale)
         .map(|(_, width, _)| width + font_size * 0.18)
         .unwrap_or_else(|| {
             measure_runs_width(
@@ -137,6 +150,109 @@ fn math_run_width(run: &TextRun, font_size: f32) -> f32 {
                 font_size,
             )
         })
+}
+
+fn math_layout_runs(run: &TextRun, font_size: f32, max_width: f32) -> Vec<(TextRun, f32)> {
+    let full_width = math_run_width(run, font_size);
+    if full_width <= max_width {
+        return vec![(run.clone(), full_width)];
+    }
+
+    let Some(scale) = inline_math_scale(&run.text, font_size) else {
+        return vec![(run.clone(), full_width)];
+    };
+    let pieces = split_latex_for_wrap(&run.text);
+    if pieces.len() <= 1 {
+        return vec![(run.clone(), full_width)];
+    }
+
+    pieces
+        .into_iter()
+        .map(|piece| {
+            let mut run = TextRun::new(piece, TextStyle::Math);
+            run.math_scale = Some(scale);
+            let width = math_run_width(&run, font_size);
+            (run, width)
+        })
+        .collect()
+}
+
+fn inline_math_scale(latex: &str, font_size: f32) -> Option<f32> {
+    let options = mathjax_svg_rs::Options {
+        font_size: font_size as f64,
+        horizontal_align: mathjax_svg_rs::HorizontalAlign::Left,
+    };
+    let math_svg = render_math_svg_cached(latex.trim(), &options).ok()?;
+    let (_, _, _, vb_h) = svg_view_box(&math_svg)?;
+    Some(font_size * 1.15 / vb_h)
+}
+
+fn inline_math_render(
+    latex: &str,
+    font_size: f32,
+    scale: Option<f32>,
+) -> Option<(crate::math::InlineMathSvg, f32, f32)> {
+    let Some(scale) = scale else {
+        return inline_math_svg(latex, font_size);
+    };
+
+    let options = mathjax_svg_rs::Options {
+        font_size: font_size as f64,
+        horizontal_align: mathjax_svg_rs::HorizontalAlign::Left,
+    };
+    let math_svg = render_math_svg_cached(latex.trim(), &options).ok()?;
+    let (vb_x, vb_y, vb_w, vb_h) = svg_view_box(&math_svg)?;
+    let inner = svg_inner_content(&math_svg)?.to_string();
+
+    Some((
+        crate::math::InlineMathSvg {
+            view_box: format!("{vb_x} {vb_y} {vb_w} {vb_h}"),
+            inner,
+        },
+        vb_w * scale,
+        vb_h * scale,
+    ))
+}
+
+fn split_latex_for_wrap(latex: &str) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    let mut escaped = false;
+
+    for (idx, ch) in latex.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => escaped = true,
+            '{' => depth += 1,
+            '}' => depth = (depth - 1).max(0),
+            '=' | '+' if depth == 0 => {
+                let end = idx + ch.len_utf8();
+                push_latex_piece(&mut pieces, &latex[start..end]);
+                start = end;
+            }
+            '-' if depth == 0 && idx > start => {
+                let end = idx + ch.len_utf8();
+                push_latex_piece(&mut pieces, &latex[start..end]);
+                start = end;
+            }
+            _ => {}
+        }
+    }
+
+    push_latex_piece(&mut pieces, &latex[start..]);
+    pieces
+}
+
+fn push_latex_piece(pieces: &mut Vec<String>, piece: &str) {
+    let piece = piece.trim();
+    if !piece.is_empty() {
+        pieces.push(piece.to_string());
+    }
 }
 
 fn text_char_width(
@@ -438,6 +554,7 @@ impl SvgBuilder {
         for line in &lines {
             self.render_rich_line(
                 PADDING,
+                available_w,
                 self.y,
                 font_size,
                 fill,
@@ -462,6 +579,7 @@ impl SvgBuilder {
         for line in &lines {
             self.render_rich_line(
                 PADDING,
+                available_w,
                 self.y,
                 BODY_FONT_SIZE,
                 COLOR_TEXT,
@@ -477,6 +595,7 @@ impl SvgBuilder {
     fn render_rich_line(
         &mut self,
         x: f32,
+        _max_width: f32,
         baseline_y: f32,
         font_size: f32,
         fill: &str,
@@ -507,7 +626,8 @@ impl SvgBuilder {
                 );
                 text_group.clear();
 
-                if let Some((svg, w, h)) = inline_math_svg(&run.text, font_size) {
+                if let Some((svg, w, h)) = inline_math_render(&run.text, font_size, run.math_scale)
+                {
                     let y = baseline_y - h * 0.78;
                     self.elems.push(format!(
                         "<svg x=\"{current_x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" viewBox=\"{}\" color=\"#0f766e\">{}</svg>",
@@ -801,6 +921,7 @@ impl SvgBuilder {
 
                     self.render_rich_line(
                         text_x,
+                        text_w,
                         baseline_y,
                         TABLE_FONT_SIZE,
                         if is_header { "#1f2937" } else { COLOR_TEXT },
@@ -1038,6 +1159,7 @@ impl SvgBuilder {
                 for line in &lines {
                     self.render_rich_line(
                         x,
+                        available_w,
                         self.y,
                         BODY_FONT_SIZE,
                         "#374151",
@@ -1124,6 +1246,7 @@ impl SvgBuilder {
                     for line in &lines {
                         self.render_rich_line(
                             content_x,
+                            available_w,
                             self.y,
                             BODY_FONT_SIZE,
                             COLOR_TEXT,
@@ -1191,6 +1314,7 @@ impl SvgBuilder {
                 for line in &lines {
                     self.render_rich_line(
                         x,
+                        available_w,
                         self.y,
                         font_size,
                         fill,
@@ -1211,6 +1335,7 @@ impl SvgBuilder {
                 for line in &lines {
                     self.render_rich_line(
                         x,
+                        available_w,
                         self.y,
                         BODY_FONT_SIZE,
                         COLOR_TEXT,
