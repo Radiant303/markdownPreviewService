@@ -3,10 +3,12 @@ use crate::code::{highlight_code, wrap_highlighted_code_lines};
 use crate::constants::*;
 use crate::math::{inline_math_svg, render_math_svg_cached, svg_inner_content, svg_view_box};
 use crate::text::{
-    layout_rich_lines, measure_runs_width, push_text_run, runs_have_visible_text,
-    svg_tspan_for_run, LayoutLine, TextRun, TextStyle,
+    layout_rich_lines as layout_text_lines, measure_runs_width, push_text_run,
+    runs_have_visible_text, split_runs_on_newlines, svg_tspan_for_run, LayoutLine, TextRun,
+    TextStyle,
 };
 use crate::util::esc;
+use std::collections::HashMap;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  Inline → TextRun conversion
@@ -20,10 +22,136 @@ pub(crate) fn inlines_to_runs(inlines: &[Inline]) -> Vec<TextRun> {
             Inline::Bold(s) => push_text_run(&mut runs, s, TextStyle::Bold),
             Inline::Italic(s) => push_text_run(&mut runs, s, TextStyle::Italic),
             Inline::Code(s) => push_text_run(&mut runs, format!(" {s} "), TextStyle::Code),
-            Inline::Math(s) => push_text_run(&mut runs, s, TextStyle::Math),
+            Inline::Math(s) => runs.push(TextRun::new(s, TextStyle::Math)),
         }
     }
     runs
+}
+
+fn layout_rich_lines(
+    runs: &[TextRun],
+    max_width: f32,
+    font_size: f32,
+    line_height: f32,
+) -> Vec<LayoutLine> {
+    if !runs.iter().any(|run| run.style == TextStyle::Math) {
+        return layout_text_lines(runs, max_width, font_size, line_height);
+    }
+
+    layout_rich_lines_with_atomic_math(runs, max_width, font_size)
+}
+
+fn layout_rich_lines_with_atomic_math(
+    runs: &[TextRun],
+    max_width: f32,
+    font_size: f32,
+) -> Vec<LayoutLine> {
+    let mut out = Vec::new();
+    let mut char_widths = HashMap::new();
+
+    for logical_runs in split_runs_on_newlines(runs) {
+        if logical_runs.is_empty() || !runs_have_visible_text(&logical_runs) {
+            out.push(LayoutLine {
+                runs: Vec::new(),
+                width: 0.0,
+            });
+            continue;
+        }
+
+        let mut line_runs = Vec::new();
+        let mut line_width = 0.0f32;
+
+        for run in logical_runs {
+            if run.style == TextStyle::Math {
+                let run_width = math_run_width(&run, font_size);
+                if line_width + run_width > max_width && runs_have_visible_text(&line_runs) {
+                    push_layout_line(&mut out, std::mem::take(&mut line_runs), font_size);
+                    line_width = 0.0;
+                }
+
+                line_runs.push(run);
+                line_width += run_width;
+                continue;
+            }
+
+            for ch in run.text.chars() {
+                let ch_width = text_char_width(ch, run.style, font_size, &mut char_widths);
+                if line_width + ch_width > max_width && runs_have_visible_text(&line_runs) {
+                    push_layout_line(&mut out, std::mem::take(&mut line_runs), font_size);
+                    line_width = 0.0;
+                }
+
+                let mut buf = [0; 4];
+                push_text_run(&mut line_runs, ch.encode_utf8(&mut buf), run.style);
+                line_width += ch_width;
+            }
+        }
+
+        push_layout_line(&mut out, line_runs, font_size);
+    }
+
+    if out.is_empty() {
+        out.push(LayoutLine {
+            runs: Vec::new(),
+            width: 0.0,
+        });
+    }
+
+    out
+}
+
+fn push_layout_line(out: &mut Vec<LayoutLine>, runs: Vec<TextRun>, font_size: f32) {
+    let width = measure_line_width_with_atomic_math(&runs, font_size);
+    out.push(LayoutLine { runs, width });
+}
+
+fn measure_line_width_with_atomic_math(runs: &[TextRun], font_size: f32) -> f32 {
+    let mut width = 0.0f32;
+    let mut text_group = Vec::new();
+
+    for run in runs {
+        if run.style == TextStyle::Math {
+            if !text_group.is_empty() {
+                width += measure_runs_width(&text_group, font_size);
+                text_group.clear();
+            }
+            width += math_run_width(run, font_size);
+        } else {
+            push_text_run(&mut text_group, &run.text, run.style);
+        }
+    }
+
+    if !text_group.is_empty() {
+        width += measure_runs_width(&text_group, font_size);
+    }
+
+    width
+}
+
+fn math_run_width(run: &TextRun, font_size: f32) -> f32 {
+    inline_math_svg(&run.text, font_size)
+        .map(|(_, width, _)| width + font_size * 0.18)
+        .unwrap_or_else(|| {
+            measure_runs_width(
+                &[TextRun::new(format!("${}$", run.text), TextStyle::Math)],
+                font_size,
+            )
+        })
+}
+
+fn text_char_width(
+    ch: char,
+    style: TextStyle,
+    font_size: f32,
+    cache: &mut HashMap<(TextStyle, char), f32>,
+) -> f32 {
+    *cache.entry((style, ch)).or_insert_with(|| {
+        let mut buf = [0; 4];
+        measure_runs_width(
+            &[TextRun::new(ch.encode_utf8(&mut buf), style)],
+            font_size,
+        )
+    })
 }
 
 fn nodes_have_visible_content(nodes: &[Node]) -> bool {
