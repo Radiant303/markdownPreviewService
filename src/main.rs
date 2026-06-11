@@ -660,8 +660,11 @@ impl SvgBuilder {
             TextStyle::Math,
         )];
 
+        // Single source of truth: MathJax font_size matches our BODY_FONT_SIZE.
+        // MathJax viewBox uses ~1000 internal units per em, so scale_factor = font_size / 1000.
+        let mj_font_size = BODY_FONT_SIZE as f64;
         let options = mathjax_svg_rs::Options {
-            font_size: 24.0,
+            font_size: mj_font_size,
             horizontal_align: mathjax_svg_rs::HorizontalAlign::Center,
         };
         let Ok(math_svg) = render_math_svg_cached(latex.trim(), &options) else {
@@ -674,19 +677,37 @@ impl SvgBuilder {
             return;
         };
 
-        let target_h = 54.0f32.max((vb_h / 1000.0) * 42.0);
-        let natural_w = target_h * vb_w / vb_h;
-        let target_w = natural_w.min(max_w);
-        let target_h = target_w * vb_h / vb_w;
-        let x = PADDING + (area_w - target_w) / 2.0;
-        let y = self.y;
+        let scale_factor = BODY_FONT_SIZE / 1000.0;
+
+        // Natural size at the canonical scale.
+        let natural_h = vb_h * scale_factor;
+        let natural_w = vb_w * scale_factor;
+
+        // Shrink proportionally only when the formula overflows the available width.
+        let (render_w, render_h) = if natural_w > max_w {
+            let shrink = max_w / natural_w;
+            (max_w, natural_h * shrink)
+        } else {
+            (natural_w, natural_h)
+        };
+
+        // Vertical rhythm guard: if the formula is shorter than one LINE_HEIGHT,
+        // keep the block at LINE_HEIGHT and vertically centre the SVG inside it.
+        let (svg_y, block_h) = if render_h < LINE_HEIGHT {
+            let offset = (LINE_HEIGHT - render_h) / 2.0;
+            (self.y + offset, LINE_HEIGHT)
+        } else {
+            (self.y, render_h)
+        };
+
+        let x = PADDING + (area_w - render_w) / 2.0;
         let inner = svg_inner_content(&math_svg).unwrap_or(math_svg.as_str());
 
         self.elems.push(format!(
-            "<svg x=\"{x}\" y=\"{y}\" width=\"{target_w}\" height=\"{target_h}\" viewBox=\"{vb_x} {vb_y} {vb_w} {vb_h}\" color=\"#0f766e\">{inner}</svg>"
+            "<svg x=\"{x}\" y=\"{svg_y}\" width=\"{render_w}\" height=\"{render_h}\" viewBox=\"{vb_x} {vb_y} {vb_w} {vb_h}\" color=\"#0f766e\">{inner}</svg>"
         ));
 
-        self.y += target_h + 36.0;
+        self.y += block_h + 36.0;
     }
 
     // ── Code block ────────────────────────────────────────────────────
