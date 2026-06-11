@@ -54,6 +54,8 @@ pub(crate) fn runs_have_visible_text(runs: &[TextRun]) -> bool {
 pub(crate) struct LayoutLine {
     pub(crate) runs: Vec<TextRun>,
     pub(crate) width: f32,
+    pub(crate) height: f32,
+    pub(crate) baseline_shift: f32,
 }
 
 pub(crate) fn layout_rich_lines(
@@ -71,6 +73,8 @@ pub(crate) fn layout_rich_lines(
             out.push(LayoutLine {
                 runs: Vec::new(),
                 width: 0.0,
+                height: line_height,
+                baseline_shift: 0.0,
             });
             continue;
         }
@@ -106,6 +110,8 @@ pub(crate) fn layout_rich_lines(
                 out.push(LayoutLine {
                     runs: Vec::new(),
                     width: 0.0,
+                    height: line_height,
+                    baseline_shift: 0.0,
                 });
                 continue;
             };
@@ -113,6 +119,8 @@ pub(crate) fn layout_rich_lines(
                 out.push(LayoutLine {
                     runs: Vec::new(),
                     width: 0.0,
+                    height: line_height,
+                    baseline_shift: 0.0,
                 });
                 continue;
             };
@@ -124,7 +132,12 @@ pub(crate) fn layout_rich_lines(
                 end,
             );
             let width = layout_run.line_w;
-            out.push(LayoutLine { runs, width });
+            out.push(LayoutLine {
+                runs,
+                width,
+                height: line_height,
+                baseline_shift: 0.0,
+            });
         }
     }
 
@@ -132,6 +145,8 @@ pub(crate) fn layout_rich_lines(
         out.push(LayoutLine {
             runs: Vec::new(),
             width: 0.0,
+            height: line_height,
+            baseline_shift: 0.0,
         });
     }
 

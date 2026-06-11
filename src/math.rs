@@ -3,6 +3,7 @@ use crate::globals::MATH_SVG_CACHE;
 pub(crate) struct InlineMathSvg {
     pub(crate) view_box: String,
     pub(crate) inner: String,
+    pub(crate) baseline_offset: f32,
 }
 
 pub(crate) fn render_math_svg_cached(
@@ -43,15 +44,17 @@ pub(crate) fn inline_math_svg(latex: &str, font_size: f32) -> Option<(InlineMath
     let (vb_x, vb_y, vb_w, vb_h) = svg_view_box(&math_svg)?;
     let inner = svg_inner_content(&math_svg)?.to_string();
 
-    // MathJax uses a large internal viewBox. Scale it to align naturally with
-    // surrounding body text.
-    let target_h = font_size * 1.15;
-    let target_w = (target_h * vb_w / vb_h).max(font_size * 0.8);
+    // MathJax viewBox units are em-like. Use one consistent scale for all
+    // inline formulas so tall constructs are taller, not visually smaller.
+    let scale = font_size / 1000.0;
+    let target_w = (vb_w * scale).max(font_size * 0.8);
+    let target_h = vb_h * scale;
 
     Some((
         InlineMathSvg {
             view_box: format!("{vb_x} {vb_y} {vb_w} {vb_h}"),
             inner,
+            baseline_offset: -vb_y * scale,
         },
         target_w,
         target_h,

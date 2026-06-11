@@ -38,13 +38,14 @@ fn layout_rich_lines(
         return layout_text_lines(runs, max_width, font_size, line_height);
     }
 
-    layout_rich_lines_with_atomic_math(runs, max_width, font_size)
+    layout_rich_lines_with_atomic_math(runs, max_width, font_size, line_height)
 }
 
 fn layout_rich_lines_with_atomic_math(
     runs: &[TextRun],
     max_width: f32,
     font_size: f32,
+    line_height: f32,
 ) -> Vec<LayoutLine> {
     let mut out = Vec::new();
     let mut char_widths = HashMap::new();
@@ -54,6 +55,8 @@ fn layout_rich_lines_with_atomic_math(
             out.push(LayoutLine {
                 runs: Vec::new(),
                 width: 0.0,
+                height: line_height,
+                baseline_shift: 0.0,
             });
             continue;
         }
@@ -69,6 +72,7 @@ fn layout_rich_lines_with_atomic_math(
                             &mut out,
                             std::mem::take(&mut line_runs),
                             font_size,
+                            line_height,
                         );
                         line_width = 0.0;
                     }
@@ -86,6 +90,7 @@ fn layout_rich_lines_with_atomic_math(
                         &mut out,
                         std::mem::take(&mut line_runs),
                         font_size,
+                        line_height,
                     );
                     line_width = 0.0;
                 }
@@ -96,13 +101,15 @@ fn layout_rich_lines_with_atomic_math(
             }
         }
 
-        push_layout_line(&mut out, line_runs, font_size);
+        push_layout_line(&mut out, line_runs, font_size, line_height);
     }
 
     if out.is_empty() {
         out.push(LayoutLine {
             runs: Vec::new(),
             width: 0.0,
+            height: line_height,
+            baseline_shift: 0.0,
         });
     }
 
@@ -113,9 +120,17 @@ fn push_layout_line(
     out: &mut Vec<LayoutLine>,
     runs: Vec<TextRun>,
     font_size: f32,
+    line_height: f32,
 ) {
     let width = measure_line_width_with_atomic_math(&runs, font_size);
-    out.push(LayoutLine { runs, width });
+    let (height, baseline_shift) =
+        measure_line_height_with_atomic_math(&runs, font_size, line_height);
+    out.push(LayoutLine {
+        runs,
+        width,
+        height,
+        baseline_shift,
+    });
 }
 
 fn measure_line_width_with_atomic_math(runs: &[TextRun], font_size: f32) -> f32 {
@@ -139,6 +154,31 @@ fn measure_line_width_with_atomic_math(runs: &[TextRun], font_size: f32) -> f32 
     }
 
     width
+}
+
+fn measure_line_height_with_atomic_math(
+    runs: &[TextRun],
+    font_size: f32,
+    line_height: f32,
+) -> (f32, f32) {
+    let mut above_baseline = font_size;
+    let mut below_baseline = (line_height - font_size).max(font_size * 0.2);
+
+    for run in runs {
+        if run.style != TextStyle::Math {
+            continue;
+        }
+
+        if let Some((svg, _, h)) = inline_math_render(&run.text, font_size, run.math_scale) {
+            above_baseline = above_baseline.max(svg.baseline_offset);
+            below_baseline = below_baseline.max((h - svg.baseline_offset).max(0.0));
+        }
+    }
+
+    let baseline_shift = (above_baseline - font_size).max(0.0);
+    let height = line_height.max(baseline_shift + below_baseline + font_size * 1.1);
+
+    (height, baseline_shift)
 }
 
 fn math_run_width(run: &TextRun, font_size: f32) -> f32 {
@@ -183,8 +223,8 @@ fn inline_math_scale(latex: &str, font_size: f32) -> Option<f32> {
         horizontal_align: mathjax_svg_rs::HorizontalAlign::Left,
     };
     let math_svg = render_math_svg_cached(latex.trim(), &options).ok()?;
-    let (_, _, _, vb_h) = svg_view_box(&math_svg)?;
-    Some(font_size * 1.15 / vb_h)
+    svg_view_box(&math_svg)?;
+    Some(font_size / 1000.0)
 }
 
 fn inline_math_render(
@@ -208,6 +248,7 @@ fn inline_math_render(
         crate::math::InlineMathSvg {
             view_box: format!("{vb_x} {vb_y} {vb_w} {vb_h}"),
             inner,
+            baseline_offset: -vb_y * scale,
         },
         vb_w * scale,
         vb_h * scale,
@@ -421,8 +462,12 @@ fn layout_table(
                 Vec::new()
             };
             let line_widths = lines.iter().map(|line| line.width).collect::<Vec<_>>();
-            row_h =
-                row_h.max(lines.len().max(1) as f32 * TABLE_LINE_HEIGHT + TABLE_CELL_PAD_Y * 2.0);
+            let content_h = if lines.is_empty() {
+                TABLE_LINE_HEIGHT
+            } else {
+                lines.iter().map(|line| line.height).sum()
+            };
+            row_h = row_h.max(content_h + TABLE_CELL_PAD_Y * 2.0);
             row_layout.push(TableCellLayout {
                 lines,
                 line_widths,
@@ -555,13 +600,13 @@ impl SvgBuilder {
             self.render_rich_line(
                 PADDING,
                 available_w,
-                self.y,
+                self.y + line.baseline_shift,
                 font_size,
                 fill,
                 "font-weight=\"700\" letter-spacing=\"0.02em\"",
                 &line.runs,
             );
-            self.y += line_height;
+            self.y += line.height;
         }
         self.set_block_bottom_gap(12.0);
     }
@@ -580,13 +625,13 @@ impl SvgBuilder {
             self.render_rich_line(
                 PADDING,
                 available_w,
-                self.y,
+                self.y + line.baseline_shift,
                 BODY_FONT_SIZE,
                 COLOR_TEXT,
                 "letter-spacing=\"0.7\"",
                 &line.runs,
             );
-            self.y += LINE_HEIGHT;
+            self.y += line.height;
         }
         self.set_block_bottom_gap(6.0);
     }
@@ -628,7 +673,7 @@ impl SvgBuilder {
 
                 if let Some((svg, w, h)) = inline_math_render(&run.text, font_size, run.math_scale)
                 {
-                    let y = baseline_y - h * 0.78;
+                    let y = baseline_y - svg.baseline_offset;
                     self.elems.push(format!(
                         "<svg x=\"{current_x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" viewBox=\"{}\" color=\"#0f766e\">{}</svg>",
                         svg.view_box, svg.inner
@@ -905,7 +950,11 @@ impl SvgBuilder {
             for (col_idx, cell) in row.iter().enumerate() {
                 let col_w = layout.col_widths[col_idx];
                 let text_w = col_w - TABLE_CELL_PAD_X * 2.0;
-                let text_h = (cell.lines.len().max(1) as f32) * TABLE_LINE_HEIGHT;
+                let text_h = if cell.lines.is_empty() {
+                    TABLE_LINE_HEIGHT
+                } else {
+                    cell.lines.iter().map(|line| line.height).sum()
+                };
                 let mut baseline_y = cell_y
                     + TABLE_CELL_PAD_Y
                     + (row_h - TABLE_CELL_PAD_Y * 2.0 - text_h) / 2.0
@@ -922,7 +971,7 @@ impl SvgBuilder {
                     self.render_rich_line(
                         text_x,
                         text_w,
-                        baseline_y,
+                        baseline_y + line.baseline_shift,
                         TABLE_FONT_SIZE,
                         if is_header { "#1f2937" } else { COLOR_TEXT },
                         if is_header {
@@ -932,7 +981,7 @@ impl SvgBuilder {
                         },
                         &line.runs,
                     );
-                    baseline_y += TABLE_LINE_HEIGHT;
+                    baseline_y += line.height;
                 }
 
                 cell_x += col_w;
@@ -1160,13 +1209,13 @@ impl SvgBuilder {
                     self.render_rich_line(
                         x,
                         available_w,
-                        self.y,
+                        self.y + line.baseline_shift,
                         BODY_FONT_SIZE,
                         "#374151",
                         "font-style=\"italic\" letter-spacing=\"0.7\"",
                         &line.runs,
                     );
-                    self.y += LINE_HEIGHT;
+                    self.y += line.height;
                 }
             }
             Node::Quote { children } => {
@@ -1247,13 +1296,13 @@ impl SvgBuilder {
                         self.render_rich_line(
                             content_x,
                             available_w,
-                            self.y,
+                            self.y + line.baseline_shift,
                             BODY_FONT_SIZE,
                             COLOR_TEXT,
                             "letter-spacing=\"0.7\"",
                             &line.runs,
                         );
-                        self.y += LINE_HEIGHT;
+                        self.y += line.height;
                     }
                 }
                 Node::ListItem {
@@ -1315,13 +1364,13 @@ impl SvgBuilder {
                     self.render_rich_line(
                         x,
                         available_w,
-                        self.y,
+                        self.y + line.baseline_shift,
                         font_size,
                         fill,
                         "font-weight=\"700\" letter-spacing=\"0.02em\"",
                         &line.runs,
                     );
-                    self.y += line_height;
+                    self.y += line.height;
                 }
                 self.set_block_bottom_gap(12.0);
             }
@@ -1336,13 +1385,13 @@ impl SvgBuilder {
                     self.render_rich_line(
                         x,
                         available_w,
-                        self.y,
+                        self.y + line.baseline_shift,
                         BODY_FONT_SIZE,
                         COLOR_TEXT,
                         "letter-spacing=\"0.7\"",
                         &line.runs,
                     );
-                    self.y += LINE_HEIGHT;
+                    self.y += line.height;
                 }
                 self.set_block_bottom_gap(6.0);
             }
