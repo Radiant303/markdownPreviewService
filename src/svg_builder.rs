@@ -327,6 +327,11 @@ impl SvgBuilder {
         attrs: &str,
         runs: &[TextRun],
     ) {
+        if !runs.iter().any(|run| run.style == TextStyle::Math) {
+            self.push_text_group(x, baseline_y, font_size, fill, attrs, runs);
+            return;
+        }
+
         let mut current_x = x;
         let mut text_group: Vec<TextRun> = Vec::new();
 
@@ -372,7 +377,7 @@ impl SvgBuilder {
         self.render_text_group(current_x, baseline_y, font_size, fill, attrs, &text_group);
     }
 
-    fn render_text_group(
+    fn push_text_group(
         &mut self,
         x: f32,
         baseline_y: f32,
@@ -380,9 +385,9 @@ impl SvgBuilder {
         fill: &str,
         attrs: &str,
         runs: &[TextRun],
-    ) -> f32 {
+    ) {
         if !runs_have_visible_text(runs) {
-            return 0.0;
+            return;
         }
 
         let tspans: String = runs
@@ -397,7 +402,22 @@ impl SvgBuilder {
         self.elems.push(format!(
             "<text x=\"{x}\" y=\"{baseline_y}\" font-size=\"{font_size}\" fill=\"{fill}\" {attrs}>{tspans}</text>"
         ));
+    }
 
+    fn render_text_group(
+        &mut self,
+        x: f32,
+        baseline_y: f32,
+        font_size: f32,
+        fill: &str,
+        attrs: &str,
+        runs: &[TextRun],
+    ) -> f32 {
+        if !runs_have_visible_text(runs) {
+            return 0.0;
+        }
+
+        self.push_text_group(x, baseline_y, font_size, fill, attrs, runs);
         measure_runs_width(runs, font_size)
     }
 

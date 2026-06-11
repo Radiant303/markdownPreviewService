@@ -18,13 +18,15 @@ use pulldown_cmark::{Options, Parser};
 
 use crate::ast::AstBuilder;
 use crate::constants::IMAGE_WIDTH;
-use crate::globals::USVG_OPTS;
+use crate::globals::{FONT_SYSTEM, USVG_OPTS};
 use crate::svg_builder::{LayoutContext, SvgBuilder};
 use resvg::usvg;
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 #[tokio::main]
 async fn main() {
+    warm_rendering_resources();
+
     let app = Router::new()
         .route("/", get(|| async { "Markdown-to-PNG Service is running" }))
         .route("/generate", post(generate_handler));
@@ -34,6 +36,11 @@ async fn main() {
     println!("Server listening on {addr}");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+fn warm_rendering_resources() {
+    let _ = &*USVG_OPTS;
+    drop(FONT_SYSTEM.lock().expect("font system mutex poisoned"));
 }
 
 // ── HTTP handler ──────────────────────────────────────────────────────────────
