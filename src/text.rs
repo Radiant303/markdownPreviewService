@@ -1,4 +1,4 @@
-use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
+use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping};
 
 use crate::globals::FONT_SYSTEM;
 
@@ -191,9 +191,13 @@ pub(crate) fn measure_runs_width(runs: &[TextRun], font_size: f32) -> f32 {
 pub(crate) fn attrs_for_style(style: TextStyle) -> Attrs<'static> {
     let mut attrs = Attrs::new().family(Family::Name("LXGW WenKai"));
     match style {
-        TextStyle::Bold => attrs = attrs.weight(Weight::BOLD),
-        TextStyle::Italic => attrs = attrs.style(Style::Italic),
-        TextStyle::Code => attrs = attrs.family(Family::Name("LXGW WenKai Mono")),
+        // The bundled font set does not include all synthetic style faces.
+        // Measure with stable base faces; SVG output still applies visual style.
+        TextStyle::Bold => {}
+        // The bundled font set does not include an italic face. Keep layout on
+        // the regular face; SVG rendering still applies font-style="italic".
+        TextStyle::Italic => {}
+        TextStyle::Code => attrs = attrs.family(Family::Monospace),
         TextStyle::Math => attrs = attrs.family(Family::Serif),
         TextStyle::Normal => {}
     }
