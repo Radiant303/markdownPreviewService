@@ -367,6 +367,8 @@ pub(crate) struct SvgBuilder {
     y: f32,
     w: u32,
     word_count: usize,
+    has_rendered_block: bool,
+    pending_block_gap: f32,
 }
 
 impl SvgBuilder {
@@ -376,11 +378,33 @@ impl SvgBuilder {
             y: OUTER_PADDING + HEADER_TOP + HEADER_BOTTOM + 88.0,
             w: width,
             word_count,
+            has_rendered_block: false,
+            pending_block_gap: 0.0,
         }
     }
 
     fn text_area_width(&self) -> f32 {
         self.w as f32 - 2.0 * PADDING
+    }
+
+    fn apply_block_top_gap(&mut self, top_gap: f32) {
+        let gap = if self.has_rendered_block {
+            self.pending_block_gap.max(top_gap)
+        } else {
+            top_gap
+        };
+        self.y += gap;
+        self.pending_block_gap = 0.0;
+        self.has_rendered_block = true;
+    }
+
+    fn set_block_bottom_gap(&mut self, bottom_gap: f32) {
+        self.pending_block_gap = self.pending_block_gap.max(bottom_gap);
+    }
+
+    fn flush_pending_block_gap(&mut self) {
+        self.y += self.pending_block_gap;
+        self.pending_block_gap = 0.0;
     }
 
     // ── Heading ───────────────────────────────────────────────────────
@@ -393,9 +417,12 @@ impl SvgBuilder {
         let available_w = self.text_area_width();
         let lines = layout_rich_lines(runs, available_w, font_size, line_height);
 
-        if self.y > OUTER_PADDING + HEADER_TOP + HEADER_BOTTOM + 88.0 {
-            self.y += if level == 1 { 18.0 } else { 42.0 };
-        }
+        let top_gap = if self.has_rendered_block {
+            if level == 1 { 18.0 } else { 42.0 }
+        } else {
+            0.0
+        };
+        self.apply_block_top_gap(top_gap);
 
         // Vertical bar for H1 and H2
         if level <= 2 {
@@ -418,7 +445,7 @@ impl SvgBuilder {
             );
             self.y += line_height;
         }
-        self.y += 12.0;
+        self.set_block_bottom_gap(12.0);
     }
 
     // ── Paragraph ─────────────────────────────────────────────────────
@@ -430,7 +457,7 @@ impl SvgBuilder {
         let available_w = self.text_area_width();
         let lines = layout_rich_lines(runs, available_w, BODY_FONT_SIZE, LINE_HEIGHT);
 
-        self.y += 6.0;
+        self.apply_block_top_gap(6.0);
         for line in &lines {
             self.render_rich_line(
                 PADDING,
@@ -442,7 +469,7 @@ impl SvgBuilder {
             );
             self.y += LINE_HEIGHT;
         }
-        self.y += 6.0;
+        self.set_block_bottom_gap(6.0);
     }
 
     // ── Inline rich text line ──────────────────────────────────────────
@@ -555,7 +582,6 @@ impl SvgBuilder {
             return;
         }
 
-        self.y += 28.0;
         let area_w = self.text_area_width();
         let max_w = area_w - 48.0;
         let fallback_runs = [TextRun::new(
@@ -577,6 +603,8 @@ impl SvgBuilder {
             self.add_paragraph(&fallback_runs);
             return;
         };
+
+        self.apply_block_top_gap(28.0);
 
         let scale_factor = BODY_FONT_SIZE / 1000.0;
         let natural_h = vb_h * scale_factor;
@@ -603,12 +631,13 @@ impl SvgBuilder {
             "<svg x=\"{x}\" y=\"{svg_y}\" width=\"{render_w}\" height=\"{render_h}\" viewBox=\"{vb_x} {vb_y} {vb_w} {vb_h}\" color=\"#0f766e\">{inner}</svg>"
         ));
 
-        self.y += block_h + 36.0;
+        self.y += block_h;
+        self.set_block_bottom_gap(36.0);
     }
 
     // ── Code block ────────────────────────────────────────────────────
     fn add_code_block(&mut self, code: &str, language: &str) {
-        self.y += 16.0;
+        self.apply_block_top_gap(16.0);
 
         let pad_x = 30.0;
         let chrome_h = 50.0;
@@ -661,18 +690,20 @@ impl SvgBuilder {
             current_code_y += CODE_LH;
         }
 
-        self.y += block_h + 72.0;
+        self.y += block_h;
+        self.set_block_bottom_gap(72.0);
     }
 
     // ── Horizontal rule ───────────────────────────────────────────────
     fn add_rule(&mut self) {
+        self.apply_block_top_gap(0.0);
         self.elems.push(format!(
             "<line x1=\"{PADDING}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{COLOR_BORDER}\" stroke-width=\"2\" stroke-dasharray=\"8 8\"/>",
             self.y,
             self.w as f32 - PADDING,
             self.y,
         ));
-        self.y += 64.0;
+        self.set_block_bottom_gap(64.0);
     }
 
     // ── Table ────────────────────────────────────────────────────────
@@ -688,7 +719,7 @@ impl SvgBuilder {
             return;
         };
 
-        self.y += 22.0;
+        self.apply_block_top_gap(22.0);
         let table_x = x;
         let table_y = self.y;
         let table_h: f32 = layout.row_heights.iter().sum();
@@ -788,12 +819,13 @@ impl SvgBuilder {
             cell_y += row_h;
         }
 
-        self.y = table_y + table_h + 42.0;
+        self.y = table_y + table_h;
+        self.set_block_bottom_gap(42.0);
     }
 
     // ── Finalise SVG document ─────────────────────────────────────────
     pub(crate) fn build(&self) -> String {
-        let footer_top = self.y + 40.0;
+        let footer_top = self.y + self.pending_block_gap.max(40.0);
         let h = (footer_top + 100.0 + OUTER_PADDING).max(220.0) as u32;
         let card_w = self.w as f32 - OUTER_PADDING * 2.0;
         let card_h = h as f32 - OUTER_PADDING * 2.0;
@@ -951,6 +983,7 @@ impl SvgBuilder {
 
         ctx.quote_depth += 1;
 
+        self.apply_block_top_gap(0.0);
         let quote_w = self.text_area_width();
         let quote_pad_y = 36.0;
         let block_y = self.y;
@@ -969,13 +1002,15 @@ impl SvgBuilder {
         for child in children {
             self.render_quote_node_at(inner_x, inner_w, child, ctx);
         }
+        self.flush_pending_block_gap();
 
         let block_h = (self.y - block_y + quote_pad_y).max(LINE_HEIGHT + quote_pad_y * 2.0);
         self.elems[rect_idx] = format!(
             "<rect x=\"{PADDING}\" y=\"{block_y}\" width=\"{quote_w}\" height=\"{block_h}\" rx=\"24\" fill=\"#f8fafc\" stroke=\"#ffffff\" stroke-width=\"1\"/>"
         );
 
-        self.y = block_y + block_h + LINE_HEIGHT;
+        self.y = block_y + block_h;
+        self.set_block_bottom_gap(LINE_HEIGHT);
         ctx.quote_depth -= 1;
     }
 
@@ -1048,7 +1083,7 @@ impl SvgBuilder {
         children: &[Node],
         ctx: &mut LayoutContext,
     ) {
-        self.y += 8.0;
+        self.apply_block_top_gap(8.0);
         let quote_indent = ctx.quote_depth as f32 * 40.0;
         let list_indent = ctx.list_depth as f32 * 30.0;
         let content_x = PADDING + quote_indent + list_indent;
@@ -1112,7 +1147,8 @@ impl SvgBuilder {
                 }
             }
         }
-        self.y += 8.0;
+        self.flush_pending_block_gap();
+        self.set_block_bottom_gap(8.0);
     }
 
     fn render_node_at(&mut self, x: f32, available_w: f32, node: &Node, ctx: &mut LayoutContext) {
@@ -1126,9 +1162,12 @@ impl SvgBuilder {
                 let runs = inlines_to_runs(content);
                 let lines = layout_rich_lines(&runs, available_w, font_size, line_height);
 
-                if self.y > OUTER_PADDING + HEADER_TOP + HEADER_BOTTOM + 88.0 {
-                    self.y += if *level == 1 { 18.0 } else { 42.0 };
-                }
+                let top_gap = if self.has_rendered_block {
+                    if *level == 1 { 18.0 } else { 42.0 }
+                } else {
+                    0.0
+                };
+                self.apply_block_top_gap(top_gap);
 
                 if *level <= 2 {
                     self.elems.push(format!(
@@ -1155,7 +1194,7 @@ impl SvgBuilder {
                     );
                     self.y += line_height;
                 }
-                self.y += 12.0;
+                self.set_block_bottom_gap(12.0);
             }
             Node::Paragraph(inlines) => {
                 let runs = inlines_to_runs(inlines);
@@ -1163,7 +1202,7 @@ impl SvgBuilder {
                     return;
                 }
                 let lines = layout_rich_lines(&runs, available_w, BODY_FONT_SIZE, LINE_HEIGHT);
-                self.y += 6.0;
+                self.apply_block_top_gap(6.0);
                 for line in &lines {
                     self.render_rich_line(
                         x,
@@ -1175,7 +1214,7 @@ impl SvgBuilder {
                     );
                     self.y += LINE_HEIGHT;
                 }
-                self.y += 6.0;
+                self.set_block_bottom_gap(6.0);
             }
             Node::Quote { children } => {
                 self.render_quote(children, ctx);
