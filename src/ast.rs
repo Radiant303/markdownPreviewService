@@ -1,4 +1,4 @@
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Tag, TagEnd};
+use pulldown_cmark::{Alignment as MdAlignment, CodeBlockKind, Event, HeadingLevel, Tag, TagEnd};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  AST types
@@ -38,7 +38,20 @@ pub(crate) enum Node {
     MathBlock {
         latex: String,
     },
+    Table {
+        alignments: Vec<TableAlignment>,
+        header: Vec<Vec<Inline>>,
+        rows: Vec<Vec<Vec<Inline>>>,
+    },
     Rule,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TableAlignment {
+    None,
+    Left,
+    Center,
+    Right,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -63,6 +76,15 @@ enum Container {
     ListItem(Vec<Node>),
 }
 
+struct TableBuilder {
+    alignments: Vec<TableAlignment>,
+    header: Vec<Vec<Inline>>,
+    rows: Vec<Vec<Vec<Inline>>>,
+    current_row: Vec<Vec<Inline>>,
+    in_head: bool,
+    in_cell: bool,
+}
+
 pub(crate) struct AstBuilder {
     stack: Vec<Container>,
     current_text: String,
@@ -74,6 +96,8 @@ pub(crate) struct AstBuilder {
     code_buf: String,
     // Heading state
     heading_level: u8,
+    // Table state
+    table: Option<TableBuilder>,
 }
 
 impl AstBuilder {
@@ -87,6 +111,7 @@ impl AstBuilder {
             code_lang: String::new(),
             code_buf: String::new(),
             heading_level: 0,
+            table: None,
         };
 
         for event in events {
@@ -136,6 +161,10 @@ impl AstBuilder {
     }
 
     fn flush_inlines_as_paragraph(&mut self) {
+        if self.table.as_ref().is_some_and(|table| table.in_cell) {
+            return;
+        }
+
         let inlines = std::mem::take(&mut self.inlines);
         if !inlines.is_empty() {
             self.push_node(Node::Paragraph(inlines));
@@ -158,6 +187,84 @@ impl AstBuilder {
                 let content = std::mem::take(&mut self.code_buf);
                 self.push_node(Node::CodeBlock { language, content });
                 self.in_code = false;
+            }
+
+            // ── Tables ────────────────────────────────────────────────
+            Event::Start(Tag::Table(alignments)) => {
+                self.flush_text();
+                self.flush_inlines_as_paragraph();
+                self.table = Some(TableBuilder {
+                    alignments: alignments.into_iter().map(TableAlignment::from).collect(),
+                    header: Vec::new(),
+                    rows: Vec::new(),
+                    current_row: Vec::new(),
+                    in_head: false,
+                    in_cell: false,
+                });
+            }
+            Event::End(TagEnd::Table) => {
+                self.flush_text();
+                if let Some(table) = self.table.take() {
+                    if !table.header.is_empty() || !table.rows.is_empty() {
+                        self.push_node(Node::Table {
+                            alignments: table.alignments,
+                            header: table.header,
+                            rows: table.rows,
+                        });
+                    }
+                }
+            }
+            Event::Start(Tag::TableHead) => {
+                if let Some(table) = self.table.as_mut() {
+                    table.in_head = true;
+                }
+            }
+            Event::End(TagEnd::TableHead) => {
+                if let Some(table) = self.table.as_mut() {
+                    if !table.current_row.is_empty() {
+                        table.header = std::mem::take(&mut table.current_row);
+                    }
+                    table.in_head = false;
+                }
+            }
+            Event::Start(Tag::TableRow) => {
+                if let Some(table) = self.table.as_mut() {
+                    table.current_row.clear();
+                }
+            }
+            Event::End(TagEnd::TableRow) => {
+                self.flush_text();
+                let in_head = self.table.as_ref().is_some_and(|table| table.in_head);
+                let row = self
+                    .table
+                    .as_mut()
+                    .map(|table| std::mem::take(&mut table.current_row))
+                    .unwrap_or_default();
+
+                if !row.is_empty() {
+                    if let Some(table) = self.table.as_mut() {
+                        if in_head {
+                            table.header = row;
+                        } else {
+                            table.rows.push(row);
+                        }
+                    }
+                }
+            }
+            Event::Start(Tag::TableCell) => {
+                self.flush_text();
+                self.inlines.clear();
+                if let Some(table) = self.table.as_mut() {
+                    table.in_cell = true;
+                }
+            }
+            Event::End(TagEnd::TableCell) => {
+                self.flush_text();
+                let cell = std::mem::take(&mut self.inlines);
+                if let Some(table) = self.table.as_mut() {
+                    table.current_row.push(cell);
+                    table.in_cell = false;
+                }
             }
 
             // ── Headings ─────────────────────────────────────────────
@@ -209,8 +316,17 @@ impl AstBuilder {
             Event::End(TagEnd::List(_)) => {
                 self.flush_text();
                 self.flush_inlines_as_paragraph();
-                if let Some(Container::List { ordered, start, items }) = self.stack.pop() {
-                    self.push_node(Node::List { ordered, start, items });
+                if let Some(Container::List {
+                    ordered,
+                    start,
+                    items,
+                }) = self.stack.pop()
+                {
+                    self.push_node(Node::List {
+                        ordered,
+                        start,
+                        items,
+                    });
                 }
             }
             Event::Start(Tag::Item) => {
@@ -235,7 +351,11 @@ impl AstBuilder {
                 self.flush_text();
                 let inlines = std::mem::take(&mut self.inlines);
                 if !inlines.is_empty() {
-                    self.push_node(Node::Paragraph(inlines));
+                    if self.table.as_ref().is_some_and(|table| table.in_cell) {
+                        self.inlines = inlines;
+                    } else {
+                        self.push_node(Node::Paragraph(inlines));
+                    }
                 }
             }
 
@@ -279,10 +399,14 @@ impl AstBuilder {
             }
             Event::DisplayMath(math) => {
                 self.flush_text();
-                self.flush_inlines_as_paragraph();
-                self.push_node(Node::MathBlock {
-                    latex: math.to_string(),
-                });
+                if self.table.as_ref().is_some_and(|table| table.in_cell) {
+                    self.inlines.push(Inline::Math(math.to_string()));
+                } else {
+                    self.flush_inlines_as_paragraph();
+                    self.push_node(Node::MathBlock {
+                        latex: math.to_string(),
+                    });
+                }
             }
             Event::SoftBreak | Event::HardBreak => {
                 if self.in_code {
@@ -301,6 +425,17 @@ impl AstBuilder {
                 self.push_node(Node::Rule);
             }
             _ => {}
+        }
+    }
+}
+
+impl From<MdAlignment> for TableAlignment {
+    fn from(value: MdAlignment) -> Self {
+        match value {
+            MdAlignment::None => Self::None,
+            MdAlignment::Left => Self::Left,
+            MdAlignment::Center => Self::Center,
+            MdAlignment::Right => Self::Right,
         }
     }
 }

@@ -1,4 +1,4 @@
-use crate::ast::{Inline, Node};
+use crate::ast::{Inline, Node, TableAlignment};
 use crate::code::{highlight_code, wrap_highlighted_code_lines};
 use crate::constants::*;
 use crate::math::{inline_math_svg, render_math_svg_cached, svg_inner_content, svg_view_box};
@@ -41,7 +41,173 @@ fn node_has_visible_content(node: &Node) -> bool {
         Node::List { items, .. } => nodes_have_visible_content(items),
         Node::CodeBlock { content, .. } => !content.trim().is_empty(),
         Node::MathBlock { latex } => !latex.trim().is_empty(),
+        Node::Table { header, rows, .. } => header
+            .iter()
+            .chain(rows.iter().flat_map(|row| row.iter()))
+            .any(|cell| inlines_have_visible_content(cell)),
         Node::Rule => true,
+    }
+}
+
+struct TableCellLayout {
+    lines: Vec<Vec<TextRun>>,
+    line_widths: Vec<f32>,
+    align: TableAlignment,
+}
+
+struct TableLayout {
+    col_widths: Vec<f32>,
+    row_heights: Vec<f32>,
+    rows: Vec<Vec<TableCellLayout>>,
+    header_rows: usize,
+    width: f32,
+}
+
+const TABLE_FONT_SIZE: f32 = 28.0;
+const TABLE_LINE_HEIGHT: f32 = 44.0;
+const TABLE_CELL_PAD_X: f32 = 18.0;
+const TABLE_CELL_PAD_Y: f32 = 16.0;
+
+fn layout_table(
+    available_w: f32,
+    alignments: &[TableAlignment],
+    header: &[Vec<Inline>],
+    rows: &[Vec<Vec<Inline>>],
+) -> Option<TableLayout> {
+    struct SourceCell {
+        runs: Vec<TextRun>,
+        align: TableAlignment,
+    }
+
+    let col_count = alignments
+        .len()
+        .max(header.len())
+        .max(rows.iter().map(Vec::len).max().unwrap_or(0));
+
+    if col_count == 0 || available_w <= 0.0 {
+        return None;
+    }
+
+    let align_for_col = |idx: usize| alignments.get(idx).copied().unwrap_or(TableAlignment::None);
+
+    let mut source_rows: Vec<Vec<SourceCell>> = Vec::new();
+    if !header.is_empty() {
+        source_rows.push(
+            (0..col_count)
+                .map(|idx| SourceCell {
+                    runs: header.get(idx).map_or_else(Vec::new, |cell| {
+                        let mut runs = inlines_to_runs(cell);
+                        for run in &mut runs {
+                            if run.style == TextStyle::Normal {
+                                run.style = TextStyle::Bold;
+                            }
+                        }
+                        runs
+                    }),
+                    align: align_for_col(idx),
+                })
+                .collect(),
+        );
+    }
+
+    for row in rows {
+        source_rows.push(
+            (0..col_count)
+                .map(|idx| SourceCell {
+                    runs: row
+                        .get(idx)
+                        .map_or_else(Vec::new, |cell| inlines_to_runs(cell)),
+                    align: align_for_col(idx),
+                })
+                .collect(),
+        );
+    }
+
+    if source_rows.is_empty() {
+        return None;
+    }
+
+    let mut ideal_widths = vec![0.0f32; col_count];
+    for row in &source_rows {
+        for (idx, cell) in row.iter().enumerate() {
+            let text_w = if runs_have_visible_text(&cell.runs) {
+                measure_runs_width(&cell.runs, TABLE_FONT_SIZE)
+            } else {
+                TABLE_FONT_SIZE
+            };
+            ideal_widths[idx] = ideal_widths[idx].max(text_w + TABLE_CELL_PAD_X * 2.0);
+        }
+    }
+
+    let width_limit = available_w.max(col_count as f32 * 44.0);
+    let min_col_w = (width_limit / col_count as f32).min(110.0).max(44.0);
+    let mut col_widths: Vec<f32> = ideal_widths
+        .into_iter()
+        .map(|width| width.max(min_col_w))
+        .collect();
+    let ideal_total: f32 = col_widths.iter().sum();
+
+    if ideal_total > width_limit {
+        let min_total = min_col_w * col_count as f32;
+        if min_total >= width_limit {
+            col_widths.fill(width_limit / col_count as f32);
+        } else {
+            let scale = (width_limit - min_total) / (ideal_total - min_total);
+            for width in &mut col_widths {
+                *width = min_col_w + (*width - min_col_w) * scale;
+            }
+        }
+    }
+
+    let mut laid_out_rows = Vec::with_capacity(source_rows.len());
+    let mut row_heights = Vec::with_capacity(source_rows.len());
+
+    for row in source_rows {
+        let mut row_layout = Vec::with_capacity(col_count);
+        let mut row_h = 0.0f32;
+
+        for (idx, cell) in row.into_iter().enumerate() {
+            let content_w = (col_widths[idx] - TABLE_CELL_PAD_X * 2.0).max(12.0);
+            let lines: Vec<Vec<TextRun>> = if runs_have_visible_text(&cell.runs) {
+                layout_rich_lines(&cell.runs, content_w, TABLE_FONT_SIZE, TABLE_LINE_HEIGHT)
+                    .into_iter()
+                    .filter(|line| runs_have_visible_text(line))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let line_widths = lines
+                .iter()
+                .map(|line| measure_runs_width(line, TABLE_FONT_SIZE))
+                .collect::<Vec<_>>();
+            row_h =
+                row_h.max(lines.len().max(1) as f32 * TABLE_LINE_HEIGHT + TABLE_CELL_PAD_Y * 2.0);
+            row_layout.push(TableCellLayout {
+                lines,
+                line_widths,
+                align: cell.align,
+            });
+        }
+
+        row_heights.push(row_h.max(68.0));
+        laid_out_rows.push(row_layout);
+    }
+
+    let width = col_widths.iter().sum();
+    Some(TableLayout {
+        col_widths,
+        row_heights,
+        rows: laid_out_rows,
+        header_rows: usize::from(!header.is_empty()),
+        width,
+    })
+}
+
+fn aligned_table_text_x(x: f32, available_w: f32, line_w: f32, align: TableAlignment) -> f32 {
+    match align {
+        TableAlignment::Center => x + (available_w - line_w).max(0.0) / 2.0,
+        TableAlignment::Right => x + (available_w - line_w).max(0.0),
+        TableAlignment::None | TableAlignment::Left => x,
     }
 }
 
@@ -362,6 +528,122 @@ impl SvgBuilder {
         self.y += 48.0;
     }
 
+    // ── Table ────────────────────────────────────────────────────────
+    fn add_table(
+        &mut self,
+        x: f32,
+        available_w: f32,
+        alignments: &[TableAlignment],
+        header: &[Vec<Inline>],
+        rows: &[Vec<Vec<Inline>>],
+    ) {
+        let Some(layout) = layout_table(available_w, alignments, header, rows) else {
+            return;
+        };
+
+        self.y += 22.0;
+        let table_x = x;
+        let table_y = self.y;
+        let table_h: f32 = layout.row_heights.iter().sum();
+
+        self.elems.push(format!(
+            "<rect x=\"{table_x}\" y=\"{table_y}\" width=\"{}\" height=\"{table_h}\" rx=\"18\" fill=\"#ffffff\" stroke=\"#e5e7eb\" stroke-width=\"1.5\"/>",
+            layout.width,
+        ));
+
+        if layout.header_rows > 0 {
+            let header_h: f32 = layout.row_heights.iter().take(layout.header_rows).sum();
+            self.elems.push(format!(
+                "<path d=\"M {} {table_y} H {} Q {} {table_y} {} {} V {} H {table_x} V {} Q {table_x} {table_y} {} {table_y} Z\" fill=\"#fff7ed\"/>",
+                table_x + 18.0,
+                table_x + layout.width - 18.0,
+                table_x + layout.width,
+                table_x + layout.width,
+                table_y + 18.0,
+                table_y + header_h,
+                table_y + 18.0,
+                table_x + 18.0,
+            ));
+        }
+
+        let mut row_y = table_y;
+        for (row_idx, row_h) in layout.row_heights.iter().enumerate() {
+            if row_idx >= layout.header_rows && (row_idx - layout.header_rows) % 2 == 1 {
+                self.elems.push(format!(
+                    "<rect x=\"{table_x}\" y=\"{row_y}\" width=\"{}\" height=\"{row_h}\" fill=\"#f8fafc\" opacity=\"0.72\"/>",
+                    layout.width,
+                ));
+            }
+
+            row_y += row_h;
+            if row_idx + 1 < layout.row_heights.len() {
+                self.elems.push(format!(
+                    "<line x1=\"{table_x}\" y1=\"{row_y}\" x2=\"{}\" y2=\"{row_y}\" stroke=\"#e5e7eb\" stroke-width=\"1\"/>",
+                    table_x + layout.width,
+                ));
+            }
+        }
+
+        let mut col_x = table_x;
+        for width in layout
+            .col_widths
+            .iter()
+            .take(layout.col_widths.len().saturating_sub(1))
+        {
+            col_x += width;
+            self.elems.push(format!(
+                "<line x1=\"{col_x}\" y1=\"{table_y}\" x2=\"{col_x}\" y2=\"{}\" stroke=\"#edf2f7\" stroke-width=\"1\"/>",
+                table_y + table_h,
+            ));
+        }
+
+        let mut cell_y = table_y;
+        for (row_idx, row) in layout.rows.iter().enumerate() {
+            let mut cell_x = table_x;
+            let row_h = layout.row_heights[row_idx];
+            let is_header = row_idx < layout.header_rows;
+
+            for (col_idx, cell) in row.iter().enumerate() {
+                let col_w = layout.col_widths[col_idx];
+                let text_w = col_w - TABLE_CELL_PAD_X * 2.0;
+                let text_h = (cell.lines.len().max(1) as f32) * TABLE_LINE_HEIGHT;
+                let mut baseline_y = cell_y
+                    + TABLE_CELL_PAD_Y
+                    + (row_h - TABLE_CELL_PAD_Y * 2.0 - text_h) / 2.0
+                    + TABLE_FONT_SIZE;
+
+                for (line_runs, line_w) in cell.lines.iter().zip(&cell.line_widths) {
+                    let text_x = aligned_table_text_x(
+                        cell_x + TABLE_CELL_PAD_X,
+                        text_w,
+                        *line_w,
+                        cell.align,
+                    );
+
+                    self.render_rich_line(
+                        text_x,
+                        baseline_y,
+                        TABLE_FONT_SIZE,
+                        if is_header { "#1f2937" } else { COLOR_TEXT },
+                        if is_header {
+                            "font-weight=\"700\" letter-spacing=\"0.35\""
+                        } else {
+                            "letter-spacing=\"0.35\""
+                        },
+                        line_runs,
+                    );
+                    baseline_y += TABLE_LINE_HEIGHT;
+                }
+
+                cell_x += col_w;
+            }
+
+            cell_y += row_h;
+        }
+
+        self.y = table_y + table_h + 42.0;
+    }
+
     // ── Finalise SVG document ─────────────────────────────────────────
     pub(crate) fn build(&self) -> String {
         let footer_top = self.y + 40.0;
@@ -501,6 +783,13 @@ impl SvgBuilder {
             }
             Node::MathBlock { latex } => {
                 self.add_math_block(latex);
+            }
+            Node::Table {
+                alignments,
+                header,
+                rows,
+            } => {
+                self.add_table(PADDING, self.text_area_width(), alignments, header, rows);
             }
             Node::Rule => {
                 self.add_rule();
@@ -762,6 +1051,13 @@ impl SvgBuilder {
             }
             Node::MathBlock { latex } => {
                 self.add_math_block(latex);
+            }
+            Node::Table {
+                alignments,
+                header,
+                rows,
+            } => {
+                self.add_table(x, available_w, alignments, header, rows);
             }
             Node::Rule => {
                 self.add_rule();

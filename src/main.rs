@@ -19,8 +19,8 @@ use pulldown_cmark::{Options, Parser};
 use crate::ast::AstBuilder;
 use crate::constants::IMAGE_WIDTH;
 use crate::globals::USVG_OPTS;
-use resvg::usvg;
 use crate::svg_builder::{LayoutContext, SvgBuilder};
+use resvg::usvg;
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 #[tokio::main]
