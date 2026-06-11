@@ -9,10 +9,8 @@ RUN apk add --no-cache fontconfig ca-certificates \
 WORKDIR /app
 
 COPY ${BINARY_PATH} /usr/local/bin/markdown-preview-service
-COPY sources/fonts/*.ttf /usr/share/fonts/markdown-preview-service/
 
-RUN chmod +x /usr/local/bin/markdown-preview-service \
-    && fc-cache -f -v
+RUN chmod +x /usr/local/bin/markdown-preview-service
 
 USER app
 
