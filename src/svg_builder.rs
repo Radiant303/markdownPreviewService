@@ -1,0 +1,771 @@
+use crate::ast::{Inline, Node};
+use crate::code::{highlight_code, wrap_highlighted_code_lines};
+use crate::constants::*;
+use crate::math::{inline_math_svg, render_math_svg_cached, svg_inner_content, svg_view_box};
+use crate::text::{
+    layout_rich_lines, measure_runs_width, push_text_run, runs_have_visible_text,
+    svg_tspan_for_run, TextRun, TextStyle,
+};
+use crate::util::esc;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Inline → TextRun conversion
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub(crate) fn inlines_to_runs(inlines: &[Inline]) -> Vec<TextRun> {
+    let mut runs = Vec::new();
+    for inline in inlines {
+        match inline {
+            Inline::Text(s) => push_text_run(&mut runs, s, TextStyle::Normal),
+            Inline::Bold(s) => push_text_run(&mut runs, s, TextStyle::Bold),
+            Inline::Italic(s) => push_text_run(&mut runs, s, TextStyle::Italic),
+            Inline::Code(s) => push_text_run(&mut runs, format!(" {s} "), TextStyle::Code),
+            Inline::Math(s) => push_text_run(&mut runs, s, TextStyle::Math),
+        }
+    }
+    runs
+}
+
+fn nodes_have_visible_content(nodes: &[Node]) -> bool {
+    nodes.iter().any(node_has_visible_content)
+}
+
+fn node_has_visible_content(node: &Node) -> bool {
+    match node {
+        Node::Heading { content, .. } | Node::Paragraph(content) => {
+            inlines_have_visible_content(content)
+        }
+        Node::Quote { children } | Node::ListItem { children } => {
+            nodes_have_visible_content(children)
+        }
+        Node::List { items, .. } => nodes_have_visible_content(items),
+        Node::CodeBlock { content, .. } => !content.trim().is_empty(),
+        Node::MathBlock { latex } => !latex.trim().is_empty(),
+        Node::Rule => true,
+    }
+}
+
+fn inlines_have_visible_content(inlines: &[Inline]) -> bool {
+    inlines.iter().any(|inline| match inline {
+        Inline::Text(s)
+        | Inline::Bold(s)
+        | Inline::Italic(s)
+        | Inline::Code(s)
+        | Inline::Math(s) => !s.trim().is_empty(),
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Layout context for recursive rendering
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub(crate) struct LayoutContext {
+    pub(crate) quote_depth: usize,
+    pub(crate) list_depth: usize,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  SVG Builder
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub(crate) struct SvgBuilder {
+    elems: Vec<String>,
+    y: f32,
+    w: u32,
+    word_count: usize,
+}
+
+impl SvgBuilder {
+    pub(crate) fn new(width: u32, word_count: usize) -> Self {
+        Self {
+            elems: Vec::new(),
+            y: OUTER_PADDING + HEADER_TOP + HEADER_BOTTOM + 88.0,
+            w: width,
+            word_count,
+        }
+    }
+
+    fn text_area_width(&self) -> f32 {
+        self.w as f32 - 2.0 * PADDING
+    }
+
+    // ── Heading ───────────────────────────────────────────────────────
+    fn add_heading(&mut self, runs: &[TextRun], font_size: f32, line_height: f32, level: u8) {
+        let fill = match level {
+            1 => "#000000",
+            2 => "#111111",
+            _ => "#333333",
+        };
+        let available_w = self.text_area_width();
+        let lines = layout_rich_lines(runs, available_w, font_size, line_height);
+
+        if self.y > OUTER_PADDING + HEADER_TOP + HEADER_BOTTOM + 88.0 {
+            self.y += if level == 1 { 18.0 } else { 42.0 };
+        }
+
+        // Vertical bar for H1 and H2
+        if level <= 2 {
+            self.elems.push(format!(
+                "<rect x=\"{}\" y=\"{}\" width=\"6\" height=\"{}\" rx=\"3\" fill=\"{COLOR_SEED}\"/>",
+                PADDING - 24.0,
+                self.y - font_size * 0.85,
+                font_size * 1.1,
+            ));
+        }
+
+        for line_runs in &lines {
+            self.render_rich_line(
+                PADDING,
+                self.y,
+                font_size,
+                fill,
+                "font-weight=\"700\" letter-spacing=\"0.02em\"",
+                line_runs,
+            );
+            self.y += line_height;
+        }
+        self.y += 12.0;
+    }
+
+    // ── Paragraph ─────────────────────────────────────────────────────
+    fn add_paragraph(&mut self, runs: &[TextRun]) {
+        if !runs_have_visible_text(runs) {
+            return;
+        }
+
+        let available_w = self.text_area_width();
+        let lines = layout_rich_lines(runs, available_w, BODY_FONT_SIZE, LINE_HEIGHT);
+
+        self.y += 6.0;
+        for line_runs in &lines {
+            self.render_rich_line(
+                PADDING,
+                self.y,
+                BODY_FONT_SIZE,
+                COLOR_TEXT,
+                "letter-spacing=\"0.7\"",
+                line_runs,
+            );
+            self.y += LINE_HEIGHT;
+        }
+        self.y += 6.0;
+    }
+
+    // ── Inline rich text line ──────────────────────────────────────────
+    fn render_rich_line(
+        &mut self,
+        x: f32,
+        baseline_y: f32,
+        font_size: f32,
+        fill: &str,
+        attrs: &str,
+        runs: &[TextRun],
+    ) {
+        let mut current_x = x;
+        let mut text_group: Vec<TextRun> = Vec::new();
+
+        for run in runs {
+            if run.text.is_empty() {
+                continue;
+            }
+
+            if run.style == TextStyle::Math {
+                current_x += self.render_text_group(
+                    current_x,
+                    baseline_y,
+                    font_size,
+                    fill,
+                    attrs,
+                    &text_group,
+                );
+                text_group.clear();
+
+                if let Some((svg, w, h)) = inline_math_svg(&run.text, font_size) {
+                    let y = baseline_y - h * 0.78;
+                    self.elems.push(format!(
+                        "<svg x=\"{current_x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" viewBox=\"{}\" color=\"#0f766e\">{}</svg>",
+                        svg.view_box, svg.inner
+                    ));
+                    current_x += w + font_size * 0.18;
+                } else {
+                    let fallback = TextRun::new(format!("${}$", run.text), TextStyle::Math);
+                    current_x += self.render_text_group(
+                        current_x,
+                        baseline_y,
+                        font_size,
+                        fill,
+                        attrs,
+                        &[fallback],
+                    );
+                }
+            } else {
+                text_group.push(run.clone());
+            }
+        }
+
+        self.render_text_group(current_x, baseline_y, font_size, fill, attrs, &text_group);
+    }
+
+    fn render_text_group(
+        &mut self,
+        x: f32,
+        baseline_y: f32,
+        font_size: f32,
+        fill: &str,
+        attrs: &str,
+        runs: &[TextRun],
+    ) -> f32 {
+        if !runs_have_visible_text(runs) {
+            return 0.0;
+        }
+
+        let tspans: String = runs
+            .iter()
+            .filter(|run| !run.text.is_empty())
+            .map(|run| {
+                let (tspan_attrs, text) = svg_tspan_for_run(run);
+                format!("<tspan {tspan_attrs}>{}</tspan>", esc(&text))
+            })
+            .collect();
+
+        self.elems.push(format!(
+            "<text x=\"{x}\" y=\"{baseline_y}\" font-size=\"{font_size}\" fill=\"{fill}\" {attrs}>{tspans}</text>"
+        ));
+
+        measure_runs_width(runs, font_size)
+    }
+
+    // ── Math block (MathJax-rendered SVG) ──────────────────────────────
+    fn add_math_block(&mut self, latex: &str) {
+        if latex.trim().is_empty() {
+            return;
+        }
+
+        self.y += 28.0;
+        let area_w = self.text_area_width();
+        let max_w = area_w - 48.0;
+        let fallback_runs = [TextRun::new(
+            format!("$$ {} $$", latex.trim()),
+            TextStyle::Math,
+        )];
+
+        let mj_font_size = BODY_FONT_SIZE as f64;
+        let options = mathjax_svg_rs::Options {
+            font_size: mj_font_size,
+            horizontal_align: mathjax_svg_rs::HorizontalAlign::Center,
+        };
+        let Ok(math_svg) = render_math_svg_cached(latex.trim(), &options) else {
+            self.add_paragraph(&fallback_runs);
+            return;
+        };
+
+        let Some((vb_x, vb_y, vb_w, vb_h)) = svg_view_box(&math_svg) else {
+            self.add_paragraph(&fallback_runs);
+            return;
+        };
+
+        let scale_factor = BODY_FONT_SIZE / 1000.0;
+        let natural_h = vb_h * scale_factor;
+        let natural_w = vb_w * scale_factor;
+
+        let (render_w, render_h) = if natural_w > max_w {
+            let shrink = max_w / natural_w;
+            (max_w, natural_h * shrink)
+        } else {
+            (natural_w, natural_h)
+        };
+
+        let (svg_y, block_h) = if render_h < LINE_HEIGHT {
+            let offset = (LINE_HEIGHT - render_h) / 2.0;
+            (self.y + offset, LINE_HEIGHT)
+        } else {
+            (self.y, render_h)
+        };
+
+        let x = PADDING + (area_w - render_w) / 2.0;
+        let inner = svg_inner_content(&math_svg).unwrap_or(math_svg.as_str());
+
+        self.elems.push(format!(
+            "<svg x=\"{x}\" y=\"{svg_y}\" width=\"{render_w}\" height=\"{render_h}\" viewBox=\"{vb_x} {vb_y} {vb_w} {vb_h}\" color=\"#0f766e\">{inner}</svg>"
+        ));
+
+        self.y += block_h + 36.0;
+    }
+
+    // ── Code block ────────────────────────────────────────────────────
+    fn add_code_block(&mut self, code: &str, language: &str) {
+        self.y += 16.0;
+
+        let pad_x = 30.0;
+        let chrome_h = 50.0;
+        let pad_bottom = 20.0;
+        let content_y_offset = 6.0;
+        let block_w = self.text_area_width();
+        let code_area_w = block_w - pad_x * 2.0;
+        let highlighted = wrap_highlighted_code_lines(
+            highlight_code(code, language),
+            code_area_w,
+            CODE_FONT_SIZE,
+        );
+        let block_h = highlighted.len() as f32 * CODE_LH + chrome_h + pad_bottom + content_y_offset;
+
+        self.elems.push(format!(
+            "<rect x=\"{PADDING}\" y=\"{}\" width=\"{block_w}\" height=\"{block_h}\" rx=\"12\" fill=\"{COLOR_CODE_BG}\" stroke=\"{COLOR_CODE_BORDER}\" stroke-width=\"1\"/>",
+            self.y,
+        ));
+
+        let dot_y = self.y + 22.0;
+        self.elems.push(format!(
+            "<circle cx=\"{}\" cy=\"{dot_y}\" r=\"6\" fill=\"#ff5f56\"/><circle cx=\"{}\" cy=\"{dot_y}\" r=\"6\" fill=\"#ffbd2e\"/><circle cx=\"{}\" cy=\"{dot_y}\" r=\"6\" fill=\"#27c93f\"/>",
+            PADDING + 24.0,
+            PADDING + 44.0,
+            PADDING + 64.0,
+        ));
+
+        if !language.is_empty() {
+            self.elems.push(format!(
+                "<text x=\"{}\" y=\"{}\" font-size=\"14\" fill=\"#8b949e\" text-anchor=\"end\" font-weight=\"600\" letter-spacing=\"1\">{}</text>",
+                PADDING + block_w - 30.0,
+                self.y + 35.0,
+                esc(&language.to_uppercase()),
+            ));
+        }
+
+        let mut current_code_y = self.y + chrome_h + CODE_FONT_SIZE * 0.72 + content_y_offset;
+
+        for tokens in &highlighted {
+            let tspans: String = tokens
+                .iter()
+                .map(|(c, t)| format!("<tspan fill=\"{c}\">{}</tspan>", esc(t)))
+                .collect();
+
+            self.elems.push(format!(
+                "<text x=\"{}\" y=\"{current_code_y}\" font-size=\"{CODE_FONT_SIZE}\" style=\"font-family:'LXGW WenKai Mono','LXGWWenKaiMono','Microsoft YaHei','SimHei','Noto Sans CJK SC',sans-serif\" xml:space=\"preserve\">{tspans}</text>",
+                PADDING + pad_x,
+            ));
+
+            current_code_y += CODE_LH;
+        }
+
+        self.y += block_h + 72.0;
+    }
+
+    // ── Horizontal rule ───────────────────────────────────────────────
+    fn add_rule(&mut self) {
+        self.y += 40.0;
+        self.elems.push(format!(
+            "<line x1=\"{PADDING}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{COLOR_BORDER}\" stroke-width=\"2\" stroke-dasharray=\"8 8\"/>",
+            self.y,
+            self.w as f32 - PADDING,
+            self.y,
+        ));
+        self.y += 48.0;
+    }
+
+    // ── Finalise SVG document ─────────────────────────────────────────
+    pub(crate) fn build(&self) -> String {
+        let footer_top = self.y + 40.0;
+        let h = (footer_top + 100.0 + OUTER_PADDING).max(220.0) as u32;
+        let card_w = self.w as f32 - OUTER_PADDING * 2.0;
+        let card_h = h as f32 - OUTER_PADDING * 2.0;
+
+        let mut svg =
+            String::with_capacity(self.elems.iter().map(String::len).sum::<usize>() + 4096);
+        svg.push_str(&format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"{}\" height=\"{h}\" viewBox=\"0 0 {} {h}\">",
+            self.w, self.w,
+        ));
+
+        svg.push_str(&format!(
+            r#"
+    <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+        <feGaussianBlur in="SourceAlpha" stdDeviation="10" result="blur"/>
+        <feOffset in="blur" dx="0" dy="20" result="offsetBlur"/>
+        <feComponentTransfer>
+            <feFuncA type="linear" slope="0.08"/>
+        </feComponentTransfer>
+        <feMerge>
+            <feMergeNode/>
+            <feMergeNode in="SourceGraphic"/>
+        </feMerge>
+    </filter>
+    </defs>
+    "#
+        ));
+
+        svg.push_str(&format!(
+            "<rect width=\"100%\" height=\"100%\" fill=\"{COLOR_SURFACE}\"/>"
+        ));
+
+        let card_filter = if h > 6000 {
+            ""
+        } else {
+            " filter=\"url(#shadow)\""
+        };
+
+        svg.push_str(&format!(
+            "<rect x=\"{OUTER_PADDING}\" y=\"{OUTER_PADDING}\" width=\"{card_w}\" height=\"{card_h}\" rx=\"24\" fill=\"{COLOR_CARD}\"{card_filter}/>"
+        ));
+
+        svg.push_str(
+            "<style>text{font-family:'LXGW WenKai','Microsoft YaHei','SimHei','Noto Sans CJK SC',sans-serif;}</style>",
+        );
+
+        svg.push_str(&self.header_svg());
+        for e in &self.elems {
+            svg.push_str(e);
+        }
+        svg.push_str(&self.footer_svg(footer_top));
+        svg.push_str("</svg>");
+        svg
+    }
+
+    fn header_svg(&self) -> String {
+        let words = if self.word_count >= 1000 {
+            format!("{:.1}k WORDS", self.word_count as f32 / 1000.0)
+        } else {
+            format!("{} WORDS", self.word_count)
+        };
+        let now = chrono::Local::now();
+        let date_str = now.format("%Y.%m.%d").to_string();
+        let header_y = OUTER_PADDING + HEADER_TOP + 10.0;
+        let font_stack =
+            "font-family:'LXGW WenKai Mono','LXGWWenKaiMono','Microsoft YaHei','SimHei','Noto Sans CJK SC',sans-serif";
+        let dot_radius = 4.0;
+        let dot_cx = PADDING + dot_radius;
+        let date_x = dot_cx + dot_radius + 8.0;
+        let words_x = self.w as f32 - PADDING + 3.5;
+
+        format!(
+            "<circle cx=\"{dot_cx}\" cy=\"{}\" r=\"{dot_radius}\" fill=\"{COLOR_SEED}\"/><text x=\"{date_x}\" y=\"{header_y}\" font-size=\"25\" font-weight=\"700\" fill=\"{COLOR_TEXT_MUTED}\" stroke=\"{COLOR_TEXT_MUTED}\" stroke-width=\"0.8\" style=\"{font_stack}\" letter-spacing=\"1.2\">{}</text><text x=\"{words_x}\" y=\"{header_y}\" font-size=\"25\" font-weight=\"700\" fill=\"{COLOR_TEXT_MUTED}\" stroke=\"{COLOR_TEXT_MUTED}\" stroke-width=\"0.8\" style=\"{font_stack}\" letter-spacing=\"1.2\" text-anchor=\"end\">{}</text>",
+            header_y - 7.0,
+            date_str,
+            esc(&words),
+        )
+    }
+
+    fn footer_svg(&self, y: f32) -> String {
+        let center = self.w as f32 / 2.0;
+        format!(
+            "<line x1=\"{PADDING}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{COLOR_BORDER}\" stroke-width=\"1\" opacity=\"0.45\"/><circle cx=\"{}\" cy=\"{}\" r=\"5\" fill=\"{COLOR_SEED}\" opacity=\"0.8\" transform=\"rotate(0, {}, {})\"/><circle cx=\"{}\" cy=\"{}\" r=\"5\" fill=\"{COLOR_SEED}\" opacity=\"0.8\" transform=\"rotate(120, {}, {})\"/><circle cx=\"{}\" cy=\"{}\" r=\"5\" fill=\"{COLOR_SEED}\" opacity=\"0.8\" transform=\"rotate(240, {}, {})\"/>",
+            y,
+            self.w as f32 - PADDING,
+            y,
+            center - 24.0,
+            y + 40.0,
+            center - 24.0, y + 40.0,
+            center,
+            y + 40.0,
+            center, y + 40.0,
+            center + 24.0,
+            y + 40.0,
+            center + 24.0, y + 40.0,
+        )
+    }
+
+    // ── AST-driven rendering ───────────────────────────────────────────
+
+    pub(crate) fn render_node(&mut self, node: &Node, ctx: &mut LayoutContext) {
+        match node {
+            Node::Heading { level, content } => {
+                let (font_size, line_height) = match *level {
+                    1 => (H1_SIZE, H1_LH),
+                    2 => (H2_SIZE, H2_LH),
+                    _ => (H3_SIZE, H3_LH),
+                };
+                let runs = inlines_to_runs(content);
+                self.add_heading(&runs, font_size, line_height, *level);
+            }
+            Node::Paragraph(inlines) => {
+                let runs = inlines_to_runs(inlines);
+                self.add_paragraph(&runs);
+            }
+            Node::Quote { children } => {
+                self.render_quote(children, ctx);
+            }
+            Node::List {
+                ordered,
+                start,
+                items,
+            } => {
+                self.render_list(*ordered, *start, items, ctx);
+            }
+            Node::ListItem { children } => {
+                for child in children {
+                    self.render_node(child, ctx);
+                }
+            }
+            Node::CodeBlock { language, content } => {
+                self.add_code_block(content, language);
+            }
+            Node::MathBlock { latex } => {
+                self.add_math_block(latex);
+            }
+            Node::Rule => {
+                self.add_rule();
+            }
+        }
+    }
+
+    fn render_quote(&mut self, children: &[Node], ctx: &mut LayoutContext) {
+        if !nodes_have_visible_content(children) {
+            return;
+        }
+
+        ctx.quote_depth += 1;
+
+        self.y += 28.0;
+        let quote_w = self.text_area_width();
+        let quote_pad_y = 36.0;
+        let block_y = self.y;
+        let inner_x = PADDING + 44.0;
+        let inner_w = quote_w - 88.0;
+
+        let rect_idx = self.elems.len();
+        self.elems.push(String::new());
+        self.elems.push(format!(
+            "<text x=\"{}\" y=\"{}\" font-size=\"96\" font-weight=\"700\" fill=\"{COLOR_SEED}\" opacity=\"0.35\">&quot;</text>",
+            PADDING + 22.0,
+            block_y + 70.0,
+        ));
+
+        self.y += quote_pad_y + BODY_FONT_SIZE;
+        for child in children {
+            self.render_quote_node_at(inner_x, inner_w, child, ctx);
+        }
+
+        let block_h = (self.y - block_y + quote_pad_y).max(LINE_HEIGHT + quote_pad_y * 2.0);
+        self.elems[rect_idx] = format!(
+            "<rect x=\"{PADDING}\" y=\"{block_y}\" width=\"{quote_w}\" height=\"{block_h}\" rx=\"24\" fill=\"#f8fafc\" stroke=\"#ffffff\" stroke-width=\"1\"/>"
+        );
+
+        self.y = block_y + block_h + 40.0;
+        ctx.quote_depth -= 1;
+    }
+
+    fn render_quote_node_at(
+        &mut self,
+        x: f32,
+        available_w: f32,
+        node: &Node,
+        ctx: &mut LayoutContext,
+    ) {
+        match node {
+            Node::Paragraph(inlines) => {
+                let runs = inlines_to_runs(inlines);
+                if !runs_have_visible_text(&runs) {
+                    return;
+                }
+
+                let lines: Vec<Vec<TextRun>> =
+                    layout_rich_lines(&runs, available_w, BODY_FONT_SIZE, LINE_HEIGHT)
+                        .into_iter()
+                        .filter(|line| runs_have_visible_text(line))
+                        .collect();
+
+                for line_runs in &lines {
+                    self.render_rich_line(
+                        x,
+                        self.y,
+                        BODY_FONT_SIZE,
+                        "#374151",
+                        "font-style=\"italic\" letter-spacing=\"0.7\"",
+                        line_runs,
+                    );
+                    self.y += LINE_HEIGHT;
+                }
+            }
+            Node::Quote { children } => {
+                self.render_quote(children, ctx);
+            }
+            _ => {
+                self.render_node_at(x, available_w, node, ctx);
+            }
+        }
+    }
+
+    fn render_list(
+        &mut self,
+        ordered: bool,
+        start: Option<u64>,
+        items: &[Node],
+        ctx: &mut LayoutContext,
+    ) {
+        ctx.list_depth += 1;
+        let mut idx = start.unwrap_or(1);
+
+        for item in items {
+            if let Node::ListItem { children } = item {
+                self.render_list_item(ordered, &mut idx, children, ctx);
+            } else {
+                self.render_node(item, ctx);
+            }
+        }
+
+        ctx.list_depth -= 1;
+    }
+
+    fn render_list_item(
+        &mut self,
+        ordered: bool,
+        idx: &mut u64,
+        children: &[Node],
+        ctx: &mut LayoutContext,
+    ) {
+        self.y += 8.0;
+        let quote_indent = ctx.quote_depth as f32 * 40.0;
+        let list_indent = ctx.list_depth as f32 * 30.0;
+        let content_x = PADDING + quote_indent + list_indent;
+
+        let mut first_para = true;
+        for child in children {
+            match child {
+                Node::Paragraph(inlines) if first_para => {
+                    first_para = false;
+                    let runs = inlines_to_runs(inlines);
+                    if !runs_have_visible_text(&runs) {
+                        continue;
+                    }
+
+                    let area_w = self.text_area_width();
+                    let available_w = area_w - quote_indent - list_indent - 44.0;
+                    let lines = layout_rich_lines(&runs, available_w, BODY_FONT_SIZE, LINE_HEIGHT);
+
+                    let marker_x = content_x - 36.0;
+                    if ordered {
+                        let prefix = format!("{idx}. ");
+                        *idx += 1;
+                        let escaped = esc(&prefix);
+                        self.elems.push(format!(
+                            "<text x=\"{marker_x}\" y=\"{}\" font-size=\"{BODY_FONT_SIZE}\" fill=\"{COLOR_SEED}\" font-weight=\"700\">{escaped}</text>",
+                            self.y,
+                        ));
+                    } else {
+                        let dot_cy = self.y - BODY_FONT_SIZE * 0.35;
+                        self.elems.push(format!(
+                            "<ellipse cx=\"{}\" cy=\"{dot_cy}\" rx=\"6\" ry=\"5\" fill=\"{COLOR_SEED}\" opacity=\"0.8\" transform=\"rotate(-15, {}, {dot_cy})\"/>",
+                            marker_x + 16.0,
+                            marker_x + 16.0,
+                        ));
+                    }
+
+                    for line_runs in &lines {
+                        self.render_rich_line(
+                            content_x,
+                            self.y,
+                            BODY_FONT_SIZE,
+                            COLOR_TEXT,
+                            "letter-spacing=\"0.7\"",
+                            line_runs,
+                        );
+                        self.y += LINE_HEIGHT;
+                    }
+                }
+                Node::ListItem {
+                    children: sub_children,
+                } => {
+                    self.render_list_item(ordered, idx, sub_children, ctx);
+                }
+                _ => {
+                    self.render_node_at(
+                        content_x,
+                        self.text_area_width() - quote_indent - list_indent,
+                        child,
+                        ctx,
+                    );
+                }
+            }
+        }
+        self.y += 8.0;
+    }
+
+    fn render_node_at(&mut self, x: f32, available_w: f32, node: &Node, ctx: &mut LayoutContext) {
+        match node {
+            Node::Heading { level, content } => {
+                let (font_size, line_height) = match *level {
+                    1 => (H1_SIZE, H1_LH),
+                    2 => (H2_SIZE, H2_LH),
+                    _ => (H3_SIZE, H3_LH),
+                };
+                let runs = inlines_to_runs(content);
+                let lines = layout_rich_lines(&runs, available_w, font_size, line_height);
+
+                if self.y > OUTER_PADDING + HEADER_TOP + HEADER_BOTTOM + 88.0 {
+                    self.y += if *level == 1 { 18.0 } else { 42.0 };
+                }
+
+                if *level <= 2 {
+                    self.elems.push(format!(
+                        "<rect x=\"{}\" y=\"{}\" width=\"6\" height=\"{}\" rx=\"3\" fill=\"{COLOR_SEED}\"/>",
+                        x - 24.0,
+                        self.y - font_size * 0.85,
+                        font_size * 1.1,
+                    ));
+                }
+
+                let fill = match *level {
+                    1 => "#000000",
+                    2 => "#111111",
+                    _ => "#333333",
+                };
+                for line_runs in &lines {
+                    self.render_rich_line(
+                        x,
+                        self.y,
+                        font_size,
+                        fill,
+                        "font-weight=\"700\" letter-spacing=\"0.02em\"",
+                        line_runs,
+                    );
+                    self.y += line_height;
+                }
+                self.y += 12.0;
+            }
+            Node::Paragraph(inlines) => {
+                let runs = inlines_to_runs(inlines);
+                if !runs_have_visible_text(&runs) {
+                    return;
+                }
+                let lines = layout_rich_lines(&runs, available_w, BODY_FONT_SIZE, LINE_HEIGHT);
+                self.y += 6.0;
+                for line_runs in &lines {
+                    self.render_rich_line(
+                        x,
+                        self.y,
+                        BODY_FONT_SIZE,
+                        COLOR_TEXT,
+                        "letter-spacing=\"0.7\"",
+                        line_runs,
+                    );
+                    self.y += LINE_HEIGHT;
+                }
+                self.y += 6.0;
+            }
+            Node::Quote { children } => {
+                self.render_quote(children, ctx);
+            }
+            Node::List {
+                ordered,
+                start,
+                items,
+            } => {
+                self.render_list(*ordered, *start, items, ctx);
+            }
+            Node::ListItem { children } => {
+                for child in children {
+                    self.render_node_at(x, available_w, child, ctx);
+                }
+            }
+            Node::CodeBlock { language, content } => {
+                self.add_code_block(content, language);
+            }
+            Node::MathBlock { latex } => {
+                self.add_math_block(latex);
+            }
+            Node::Rule => {
+                self.add_rule();
+            }
+        }
+    }
+}
