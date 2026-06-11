@@ -147,10 +147,7 @@ fn text_char_width(
 ) -> f32 {
     *cache.entry((style, ch)).or_insert_with(|| {
         let mut buf = [0; 4];
-        measure_runs_width(
-            &[TextRun::new(ch.encode_utf8(&mut buf), style)],
-            font_size,
-        )
+        measure_runs_width(&[TextRun::new(ch.encode_utf8(&mut buf), style)], font_size)
     })
 }
 
@@ -195,6 +192,9 @@ const TABLE_FONT_SIZE: f32 = 28.0;
 const TABLE_LINE_HEIGHT: f32 = 44.0;
 const TABLE_CELL_PAD_X: f32 = 18.0;
 const TABLE_CELL_PAD_Y: f32 = 16.0;
+const MATH_BLOCK_TOP_GAP: f32 = 10.0;
+const MATH_BLOCK_BOTTOM_GAP: f32 = 20.0;
+const MATH_BLOCK_MIN_HEIGHT: f32 = BODY_FONT_SIZE * 1.1;
 
 fn layout_table(
     available_w: f32,
@@ -304,10 +304,7 @@ fn layout_table(
             } else {
                 Vec::new()
             };
-            let line_widths = lines
-                .iter()
-                .map(|line| line.width)
-                .collect::<Vec<_>>();
+            let line_widths = lines.iter().map(|line| line.width).collect::<Vec<_>>();
             row_h =
                 row_h.max(lines.len().max(1) as f32 * TABLE_LINE_HEIGHT + TABLE_CELL_PAD_Y * 2.0);
             row_layout.push(TableCellLayout {
@@ -418,7 +415,11 @@ impl SvgBuilder {
         let lines = layout_rich_lines(runs, available_w, font_size, line_height);
 
         let top_gap = if self.has_rendered_block {
-            if level == 1 { 18.0 } else { 42.0 }
+            if level == 1 {
+                18.0
+            } else {
+                42.0
+            }
         } else {
             0.0
         };
@@ -604,7 +605,7 @@ impl SvgBuilder {
             return;
         };
 
-        self.apply_block_top_gap(28.0);
+        self.apply_block_top_gap(MATH_BLOCK_TOP_GAP);
 
         let scale_factor = BODY_FONT_SIZE / 1000.0;
         let natural_h = vb_h * scale_factor;
@@ -617,9 +618,9 @@ impl SvgBuilder {
             (natural_w, natural_h)
         };
 
-        let (svg_y, block_h) = if render_h < LINE_HEIGHT {
-            let offset = (LINE_HEIGHT - render_h) / 2.0;
-            (self.y + offset, LINE_HEIGHT)
+        let (svg_y, block_h) = if render_h < MATH_BLOCK_MIN_HEIGHT {
+            let offset = (MATH_BLOCK_MIN_HEIGHT - render_h) / 2.0;
+            (self.y + offset, MATH_BLOCK_MIN_HEIGHT)
         } else {
             (self.y, render_h)
         };
@@ -632,7 +633,7 @@ impl SvgBuilder {
         ));
 
         self.y += block_h;
-        self.set_block_bottom_gap(36.0);
+        self.set_block_bottom_gap(MATH_BLOCK_BOTTOM_GAP);
     }
 
     // ── Code block ────────────────────────────────────────────────────
@@ -1163,7 +1164,11 @@ impl SvgBuilder {
                 let lines = layout_rich_lines(&runs, available_w, font_size, line_height);
 
                 let top_gap = if self.has_rendered_block {
-                    if *level == 1 { 18.0 } else { 42.0 }
+                    if *level == 1 {
+                        18.0
+                    } else {
+                        42.0
+                    }
                 } else {
                     0.0
                 };
