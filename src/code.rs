@@ -1,4 +1,5 @@
 use crate::globals::{SS, TS};
+use syntect::util::LinesWithEndings;
 
 pub(crate) fn highlight_code(code: &str, language: &str) -> Vec<Vec<(String, String)>> {
     let syntax = SS
@@ -13,19 +14,24 @@ pub(crate) fn highlight_code(code: &str, language: &str) -> Vec<Vec<(String, Str
 
     let mut h = syntect::easy::HighlightLines::new(syntax, theme);
 
-    code.lines()
+    LinesWithEndings::from(code)
         .map(|line| {
             let ranges = h
                 .highlight_line(line, &SS)
                 .unwrap_or_else(|_| vec![(syntect::highlighting::Style::default(), line)]);
             ranges
                 .into_iter()
-                .map(|(style, text)| {
+                .filter_map(|(style, text)| {
+                    let text = text.trim_end_matches(|ch| ch == '\r' || ch == '\n');
+                    if text.is_empty() {
+                        return None;
+                    }
+
                     let c = style.foreground;
-                    (
+                    Some((
                         format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b),
                         text.to_string(),
-                    )
+                    ))
                 })
                 .collect()
         })
@@ -59,12 +65,19 @@ pub(crate) fn wrap_highlighted_code_lines(
                 let (ch_str, text_width) = if ch == '\t' {
                     ("    ", code_char_width(' ', font_size) * 4.0)
                 } else {
-                    (ch.encode_utf8(&mut buf) as &str, code_char_width(ch, font_size))
+                    (
+                        ch.encode_utf8(&mut buf) as &str,
+                        code_char_width(ch, font_size),
+                    )
                 };
 
                 if width + text_width > max_pixel_width && !line_plain.trim().is_empty() {
                     if !current_text.is_empty() {
-                        push_code_token(&mut line_tokens, color.clone(), std::mem::take(&mut current_text));
+                        push_code_token(
+                            &mut line_tokens,
+                            color.clone(),
+                            std::mem::take(&mut current_text),
+                        );
                     }
                     trim_code_line_end(&mut line_tokens, &mut line_plain);
                     out.push(line_tokens);
