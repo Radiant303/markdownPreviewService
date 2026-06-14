@@ -349,8 +349,9 @@ const TABLE_FONT_SIZE: f32 = 28.0;
 const TABLE_LINE_HEIGHT: f32 = 44.0;
 const TABLE_CELL_PAD_X: f32 = 18.0;
 const TABLE_CELL_PAD_Y: f32 = 16.0;
-const MATH_BLOCK_TOP_GAP: f32 = 10.0;
-const MATH_BLOCK_BOTTOM_GAP: f32 = 20.0;
+const BLOCK_GAP: f32 = BODY_FONT_SIZE;
+const MATH_BLOCK_TOP_GAP: f32 = BLOCK_GAP;
+const MATH_BLOCK_BOTTOM_GAP: f32 = BLOCK_GAP;
 const MATH_BLOCK_MIN_HEIGHT: f32 = BODY_FONT_SIZE * 1.1;
 
 fn layout_table(
@@ -533,7 +534,7 @@ impl SvgBuilder {
     pub(crate) fn new(width: u32, word_count: usize) -> Self {
         Self {
             elems: Vec::new(),
-            y: OUTER_PADDING + HEADER_TOP + HEADER_BOTTOM + 88.0,
+            y: OUTER_PADDING + HEADER_TOP + HEADER_BOTTOM + BLOCK_GAP,
             w: width,
             word_count,
             has_rendered_block: false,
@@ -549,7 +550,7 @@ impl SvgBuilder {
         let gap = if self.has_rendered_block {
             self.pending_block_gap.max(top_gap)
         } else {
-            top_gap
+            0.0
         };
         self.y += gap;
         self.pending_block_gap = 0.0;
@@ -565,6 +566,16 @@ impl SvgBuilder {
         self.pending_block_gap = 0.0;
     }
 
+    fn text_baseline_y(
+        line_top: f32,
+        font_size: f32,
+        line_height: f32,
+        baseline_shift: f32,
+    ) -> f32 {
+        let leading_top = (line_height - font_size).max(0.0) * 0.5;
+        line_top + leading_top + font_size * 0.86 + baseline_shift
+    }
+
     // ── Heading ───────────────────────────────────────────────────────
     fn add_heading(&mut self, runs: &[TextRun], font_size: f32, line_height: f32, level: u8) {
         let fill = match level {
@@ -575,32 +586,22 @@ impl SvgBuilder {
         let available_w = self.text_area_width();
         let lines = layout_rich_lines(runs, available_w, font_size, line_height);
 
-        let top_gap = if self.has_rendered_block {
-            if level == 1 {
-                18.0
-            } else {
-                42.0
-            }
-        } else {
-            0.0
-        };
-        self.apply_block_top_gap(top_gap);
+        self.apply_block_top_gap(BLOCK_GAP);
+        let block_y = self.y;
 
         // Vertical bar for H1 and H2
+        let rect_idx = self.elems.len();
         if level <= 2 {
-            self.elems.push(format!(
-                "<rect x=\"{}\" y=\"{}\" width=\"6\" height=\"{}\" rx=\"3\" fill=\"{COLOR_SEED}\"/>",
-                PADDING - 24.0,
-                self.y - font_size * 0.85,
-                font_size * 1.1,
-            ));
+            self.elems.push(String::new());
         }
 
         for line in &lines {
+            let baseline_y =
+                Self::text_baseline_y(self.y, font_size, line.height, line.baseline_shift);
             self.render_rich_line(
                 PADDING,
                 available_w,
-                self.y + line.baseline_shift,
+                baseline_y,
                 font_size,
                 fill,
                 "font-weight=\"700\" letter-spacing=\"0.02em\"",
@@ -608,7 +609,17 @@ impl SvgBuilder {
             );
             self.y += line.height;
         }
-        self.set_block_bottom_gap(12.0);
+
+        if level <= 2 {
+            let rect_h = (self.y - block_y).max(font_size * 1.1);
+            self.elems[rect_idx] = format!(
+                "<rect x=\"{}\" y=\"{}\" width=\"6\" height=\"{}\" rx=\"3\" fill=\"{COLOR_SEED}\"/>",
+                PADDING - 24.0,
+                block_y,
+                rect_h,
+            );
+        }
+        self.set_block_bottom_gap(BLOCK_GAP);
     }
 
     // ── Paragraph ─────────────────────────────────────────────────────
@@ -620,12 +631,14 @@ impl SvgBuilder {
         let available_w = self.text_area_width();
         let lines = layout_rich_lines(runs, available_w, BODY_FONT_SIZE, LINE_HEIGHT);
 
-        self.apply_block_top_gap(6.0);
+        self.apply_block_top_gap(BLOCK_GAP);
         for line in &lines {
+            let baseline_y =
+                Self::text_baseline_y(self.y, BODY_FONT_SIZE, line.height, line.baseline_shift);
             self.render_rich_line(
                 PADDING,
                 available_w,
-                self.y + line.baseline_shift,
+                baseline_y,
                 BODY_FONT_SIZE,
                 COLOR_TEXT,
                 "letter-spacing=\"0.7\"",
@@ -633,7 +646,7 @@ impl SvgBuilder {
             );
             self.y += line.height;
         }
-        self.set_block_bottom_gap(6.0);
+        self.set_block_bottom_gap(BLOCK_GAP);
     }
 
     // ── Inline rich text line ──────────────────────────────────────────
@@ -783,12 +796,8 @@ impl SvgBuilder {
             (natural_w, natural_h)
         };
 
-        let (svg_y, block_h) = if render_h < MATH_BLOCK_MIN_HEIGHT {
-            let offset = (MATH_BLOCK_MIN_HEIGHT - render_h) / 2.0;
-            (self.y + offset, MATH_BLOCK_MIN_HEIGHT)
-        } else {
-            (self.y, render_h)
-        };
+        let block_h = render_h.max(MATH_BLOCK_MIN_HEIGHT);
+        let svg_y = self.y + (block_h - render_h) / 2.0;
 
         let x = PADDING + (area_w - render_w) / 2.0;
         let inner = svg_inner_content(&math_svg).unwrap_or(math_svg.as_str());
@@ -803,12 +812,11 @@ impl SvgBuilder {
 
     // ── Code block ────────────────────────────────────────────────────
     fn add_code_block(&mut self, code: &str, language: &str) {
-        self.apply_block_top_gap(16.0);
+        self.apply_block_top_gap(BLOCK_GAP);
 
         let pad_x = 30.0;
         let chrome_h = 50.0;
-        let pad_bottom = 20.0;
-        let content_y_offset = 6.0;
+        let code_pad_y = 18.0;
         let block_w = self.text_area_width();
         let code_area_w = block_w - pad_x * 2.0;
         let highlighted = wrap_highlighted_code_lines(
@@ -816,7 +824,8 @@ impl SvgBuilder {
             code_area_w,
             CODE_FONT_SIZE,
         );
-        let block_h = highlighted.len() as f32 * CODE_LH + chrome_h + pad_bottom + content_y_offset;
+        let code_content_h = highlighted.len().max(1) as f32 * CODE_LH;
+        let block_h = chrome_h + code_pad_y * 2.0 + code_content_h;
 
         self.elems.push(format!(
             "<rect x=\"{PADDING}\" y=\"{}\" width=\"{block_w}\" height=\"{block_h}\" rx=\"12\" fill=\"{COLOR_CODE_BG}\" stroke=\"{COLOR_CODE_BORDER}\" stroke-width=\"1\"/>",
@@ -840,7 +849,7 @@ impl SvgBuilder {
             ));
         }
 
-        let mut current_code_y = self.y + chrome_h + CODE_FONT_SIZE * 0.72 + content_y_offset;
+        let mut current_code_y = self.y + chrome_h + code_pad_y + CODE_FONT_SIZE * 0.78;
 
         for tokens in &highlighted {
             let tspans: String = tokens
@@ -857,19 +866,19 @@ impl SvgBuilder {
         }
 
         self.y += block_h;
-        self.set_block_bottom_gap(72.0);
+        self.set_block_bottom_gap(BLOCK_GAP);
     }
 
     // ── Horizontal rule ───────────────────────────────────────────────
     fn add_rule(&mut self) {
-        self.apply_block_top_gap(0.0);
+        self.apply_block_top_gap(BLOCK_GAP);
         self.elems.push(format!(
             "<line x1=\"{PADDING}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{COLOR_BORDER}\" stroke-width=\"2\" stroke-dasharray=\"8 8\"/>",
             self.y,
             self.w as f32 - PADDING,
             self.y,
         ));
-        self.set_block_bottom_gap(64.0);
+        self.set_block_bottom_gap(BLOCK_GAP);
     }
 
     // ── Table ────────────────────────────────────────────────────────
@@ -885,7 +894,7 @@ impl SvgBuilder {
             return;
         };
 
-        self.apply_block_top_gap(22.0);
+        self.apply_block_top_gap(BLOCK_GAP);
         let table_x = x;
         let table_y = self.y;
         let table_h: f32 = layout.row_heights.iter().sum();
@@ -991,12 +1000,12 @@ impl SvgBuilder {
         }
 
         self.y = table_y + table_h;
-        self.set_block_bottom_gap(42.0);
+        self.set_block_bottom_gap(BLOCK_GAP);
     }
 
     // ── Finalise SVG document ─────────────────────────────────────────
     pub(crate) fn build(&self) -> String {
-        let footer_top = self.y + self.pending_block_gap.max(40.0);
+        let footer_top = self.y + self.pending_block_gap.max(BLOCK_GAP);
         let h = (footer_top + 100.0 + OUTER_PADDING).max(220.0) as u32;
         let card_w = self.w as f32 - OUTER_PADDING * 2.0;
         let card_h = h as f32 - OUTER_PADDING * 2.0;
@@ -1154,7 +1163,7 @@ impl SvgBuilder {
 
         ctx.quote_depth += 1;
 
-        self.apply_block_top_gap(0.0);
+        self.apply_block_top_gap(BLOCK_GAP);
         let quote_w = self.text_area_width();
         let quote_pad_y = 36.0;
         let block_y = self.y;
@@ -1181,7 +1190,7 @@ impl SvgBuilder {
         );
 
         self.y = block_y + block_h;
-        self.set_block_bottom_gap(LINE_HEIGHT);
+        self.set_block_bottom_gap(BLOCK_GAP);
         ctx.quote_depth -= 1;
     }
 
@@ -1206,10 +1215,16 @@ impl SvgBuilder {
                         .collect();
 
                 for line in &lines {
+                    let baseline_y = Self::text_baseline_y(
+                        self.y,
+                        BODY_FONT_SIZE,
+                        line.height,
+                        line.baseline_shift,
+                    );
                     self.render_rich_line(
                         x,
                         available_w,
-                        self.y + line.baseline_shift,
+                        baseline_y,
                         BODY_FONT_SIZE,
                         "#374151",
                         "font-style=\"italic\" letter-spacing=\"0.7\"",
@@ -1255,7 +1270,7 @@ impl SvgBuilder {
         children: &[Node],
         ctx: &mut LayoutContext,
     ) {
-        self.apply_block_top_gap(8.0);
+        self.apply_block_top_gap(BLOCK_GAP);
         let quote_indent = ctx.quote_depth as f32 * 40.0;
         let list_indent = ctx.list_depth as f32 * 30.0;
         let content_x = PADDING + quote_indent + list_indent;
@@ -1273,6 +1288,17 @@ impl SvgBuilder {
                     let area_w = self.text_area_width();
                     let available_w = area_w - quote_indent - list_indent - 44.0;
                     let lines = layout_rich_lines(&runs, available_w, BODY_FONT_SIZE, LINE_HEIGHT);
+                    let first_baseline_y = lines
+                        .first()
+                        .map(|line| {
+                            Self::text_baseline_y(
+                                self.y,
+                                BODY_FONT_SIZE,
+                                line.height,
+                                line.baseline_shift,
+                            )
+                        })
+                        .unwrap_or(self.y + BODY_FONT_SIZE);
 
                     let marker_x = content_x - 36.0;
                     if ordered {
@@ -1281,10 +1307,10 @@ impl SvgBuilder {
                         let escaped = esc(&prefix);
                         self.elems.push(format!(
                             "<text x=\"{marker_x}\" y=\"{}\" font-size=\"{BODY_FONT_SIZE}\" fill=\"{COLOR_SEED}\" font-weight=\"700\">{escaped}</text>",
-                            self.y,
+                            first_baseline_y,
                         ));
                     } else {
-                        let dot_cy = self.y - BODY_FONT_SIZE * 0.35;
+                        let dot_cy = first_baseline_y - BODY_FONT_SIZE * 0.35;
                         self.elems.push(format!(
                             "<ellipse cx=\"{}\" cy=\"{dot_cy}\" rx=\"6\" ry=\"5\" fill=\"{COLOR_SEED}\" opacity=\"0.8\" transform=\"rotate(-15, {}, {dot_cy})\"/>",
                             marker_x + 16.0,
@@ -1293,10 +1319,16 @@ impl SvgBuilder {
                     }
 
                     for line in &lines {
+                        let baseline_y = Self::text_baseline_y(
+                            self.y,
+                            BODY_FONT_SIZE,
+                            line.height,
+                            line.baseline_shift,
+                        );
                         self.render_rich_line(
                             content_x,
                             available_w,
-                            self.y + line.baseline_shift,
+                            baseline_y,
                             BODY_FONT_SIZE,
                             COLOR_TEXT,
                             "letter-spacing=\"0.7\"",
@@ -1321,7 +1353,7 @@ impl SvgBuilder {
             }
         }
         self.flush_pending_block_gap();
-        self.set_block_bottom_gap(8.0);
+        self.set_block_bottom_gap(BLOCK_GAP);
     }
 
     fn render_node_at(&mut self, x: f32, available_w: f32, node: &Node, ctx: &mut LayoutContext) {
@@ -1335,24 +1367,12 @@ impl SvgBuilder {
                 let runs = inlines_to_runs(content);
                 let lines = layout_rich_lines(&runs, available_w, font_size, line_height);
 
-                let top_gap = if self.has_rendered_block {
-                    if *level == 1 {
-                        18.0
-                    } else {
-                        42.0
-                    }
-                } else {
-                    0.0
-                };
-                self.apply_block_top_gap(top_gap);
+                self.apply_block_top_gap(BLOCK_GAP);
+                let block_y = self.y;
 
+                let rect_idx = self.elems.len();
                 if *level <= 2 {
-                    self.elems.push(format!(
-                        "<rect x=\"{}\" y=\"{}\" width=\"6\" height=\"{}\" rx=\"3\" fill=\"{COLOR_SEED}\"/>",
-                        x - 24.0,
-                        self.y - font_size * 0.85,
-                        font_size * 1.1,
-                    ));
+                    self.elems.push(String::new());
                 }
 
                 let fill = match *level {
@@ -1361,10 +1381,12 @@ impl SvgBuilder {
                     _ => "#333333",
                 };
                 for line in &lines {
+                    let baseline_y =
+                        Self::text_baseline_y(self.y, font_size, line.height, line.baseline_shift);
                     self.render_rich_line(
                         x,
                         available_w,
-                        self.y + line.baseline_shift,
+                        baseline_y,
                         font_size,
                         fill,
                         "font-weight=\"700\" letter-spacing=\"0.02em\"",
@@ -1372,7 +1394,16 @@ impl SvgBuilder {
                     );
                     self.y += line.height;
                 }
-                self.set_block_bottom_gap(12.0);
+                if *level <= 2 {
+                    let rect_h = (self.y - block_y).max(font_size * 1.1);
+                    self.elems[rect_idx] = format!(
+                        "<rect x=\"{}\" y=\"{}\" width=\"6\" height=\"{}\" rx=\"3\" fill=\"{COLOR_SEED}\"/>",
+                        x - 24.0,
+                        block_y,
+                        rect_h,
+                    );
+                }
+                self.set_block_bottom_gap(BLOCK_GAP);
             }
             Node::Paragraph(inlines) => {
                 let runs = inlines_to_runs(inlines);
@@ -1380,12 +1411,18 @@ impl SvgBuilder {
                     return;
                 }
                 let lines = layout_rich_lines(&runs, available_w, BODY_FONT_SIZE, LINE_HEIGHT);
-                self.apply_block_top_gap(6.0);
+                self.apply_block_top_gap(BLOCK_GAP);
                 for line in &lines {
+                    let baseline_y = Self::text_baseline_y(
+                        self.y,
+                        BODY_FONT_SIZE,
+                        line.height,
+                        line.baseline_shift,
+                    );
                     self.render_rich_line(
                         x,
                         available_w,
-                        self.y + line.baseline_shift,
+                        baseline_y,
                         BODY_FONT_SIZE,
                         COLOR_TEXT,
                         "letter-spacing=\"0.7\"",
@@ -1393,7 +1430,7 @@ impl SvgBuilder {
                     );
                     self.y += line.height;
                 }
-                self.set_block_bottom_gap(6.0);
+                self.set_block_bottom_gap(BLOCK_GAP);
             }
             Node::Quote { children } => {
                 self.render_quote(children, ctx);
