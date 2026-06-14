@@ -1,7 +1,7 @@
 use crate::ast::{Inline, Node, TableAlignment};
 use crate::code::{highlight_code, wrap_highlighted_code_lines};
 use crate::constants::*;
-use crate::math::{inline_math_svg, render_math_svg_cached, svg_inner_content, svg_view_box};
+use crate::math::{inline_math_svg, parsed_math_svg_cached};
 use crate::text::{
     layout_rich_lines as layout_text_lines, measure_runs_width, push_text_run,
     runs_have_visible_text, split_runs_on_newlines, svg_tspan_for_run, LayoutLine, TextRun,
@@ -222,8 +222,7 @@ fn inline_math_scale(latex: &str, font_size: f32) -> Option<f32> {
         font_size: font_size as f64,
         horizontal_align: mathjax_svg_rs::HorizontalAlign::Left,
     };
-    let math_svg = render_math_svg_cached(latex.trim(), &options).ok()?;
-    svg_view_box(&math_svg)?;
+    parsed_math_svg_cached(latex, &options).ok()?;
     Some(font_size / 1000.0)
 }
 
@@ -240,18 +239,16 @@ fn inline_math_render(
         font_size: font_size as f64,
         horizontal_align: mathjax_svg_rs::HorizontalAlign::Left,
     };
-    let math_svg = render_math_svg_cached(latex.trim(), &options).ok()?;
-    let (vb_x, vb_y, vb_w, vb_h) = svg_view_box(&math_svg)?;
-    let inner = svg_inner_content(&math_svg)?.to_string();
+    let parsed = parsed_math_svg_cached(latex, &options).ok()?;
 
     Some((
         crate::math::InlineMathSvg {
-            view_box: format!("{vb_x} {vb_y} {vb_w} {vb_h}"),
-            inner,
-            baseline_offset: -vb_y * scale,
+            view_box: parsed.view_box,
+            inner: parsed.inner,
+            baseline_offset: -parsed.vb_y * scale,
         },
-        vb_w * scale,
-        vb_h * scale,
+        parsed.vb_w * scale,
+        parsed.vb_h * scale,
     ))
 }
 
@@ -773,12 +770,7 @@ impl SvgBuilder {
             font_size: mj_font_size,
             horizontal_align: mathjax_svg_rs::HorizontalAlign::Center,
         };
-        let Ok(math_svg) = render_math_svg_cached(latex.trim(), &options) else {
-            self.add_paragraph(&fallback_runs);
-            return;
-        };
-
-        let Some((vb_x, vb_y, vb_w, vb_h)) = svg_view_box(&math_svg) else {
+        let Ok(parsed) = parsed_math_svg_cached(latex, &options) else {
             self.add_paragraph(&fallback_runs);
             return;
         };
@@ -786,8 +778,8 @@ impl SvgBuilder {
         self.apply_block_top_gap(MATH_BLOCK_TOP_GAP);
 
         let scale_factor = BODY_FONT_SIZE / 1000.0;
-        let natural_h = vb_h * scale_factor;
-        let natural_w = vb_w * scale_factor;
+        let natural_h = parsed.vb_h * scale_factor;
+        let natural_w = parsed.vb_w * scale_factor;
 
         let (render_w, render_h) = if natural_w > max_w {
             let shrink = max_w / natural_w;
@@ -800,10 +792,10 @@ impl SvgBuilder {
         let svg_y = self.y + (block_h - render_h) / 2.0;
 
         let x = PADDING + (area_w - render_w) / 2.0;
-        let inner = svg_inner_content(&math_svg).unwrap_or(math_svg.as_str());
 
         self.elems.push(format!(
-            "<svg x=\"{x}\" y=\"{svg_y}\" width=\"{render_w}\" height=\"{render_h}\" viewBox=\"{vb_x} {vb_y} {vb_w} {vb_h}\" color=\"#0f766e\">{inner}</svg>"
+            "<svg x=\"{x}\" y=\"{svg_y}\" width=\"{render_w}\" height=\"{render_h}\" viewBox=\"{}\" color=\"#0f766e\">{}</svg>",
+            parsed.view_box, parsed.inner
         ));
 
         self.y += block_h;

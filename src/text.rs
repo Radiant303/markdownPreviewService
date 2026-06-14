@@ -1,4 +1,8 @@
 use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping};
+use std::{
+    collections::HashMap,
+    sync::{LazyLock, Mutex},
+};
 
 use crate::globals::FONT_SYSTEM;
 
@@ -57,6 +61,9 @@ pub(crate) struct LayoutLine {
     pub(crate) height: f32,
     pub(crate) baseline_shift: f32,
 }
+
+static TEXT_WIDTH_CACHE: LazyLock<Mutex<HashMap<String, f32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(crate) fn layout_rich_lines(
     runs: &[TextRun],
@@ -125,12 +132,7 @@ pub(crate) fn layout_rich_lines(
                 continue;
             };
 
-            let runs = slice_runs_by_byte_range(
-                &full_text,
-                &byte_styles,
-                start,
-                end,
-            );
+            let runs = slice_runs_by_byte_range(&full_text, &byte_styles, start, end);
             let width = layout_run.line_w;
             out.push(LayoutLine {
                 runs,
@@ -196,6 +198,15 @@ pub(crate) fn measure_runs_width(runs: &[TextRun], font_size: f32) -> f32 {
         return 0.0;
     }
 
+    let cache_key = width_cache_key(runs, font_size);
+    if let Some(width) = TEXT_WIDTH_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&cache_key).copied())
+    {
+        return width;
+    }
+
     let mut font_system = FONT_SYSTEM.lock().expect("font system mutex poisoned");
     let metrics = Metrics::new(font_size, font_size * 1.4);
     let mut buffer = Buffer::new(&mut font_system, metrics);
@@ -221,10 +232,41 @@ pub(crate) fn measure_runs_width(runs: &[TextRun], font_size: f32) -> f32 {
         Shaping::Advanced,
     );
 
-    buffer
+    let width = buffer
         .layout_runs()
         .map(|run| run.line_w)
-        .fold(0.0f32, f32::max)
+        .fold(0.0f32, f32::max);
+
+    if let Ok(mut cache) = TEXT_WIDTH_CACHE.lock() {
+        if cache.len() > 4096 {
+            cache.clear();
+        }
+        cache.insert(cache_key, width);
+    }
+
+    width
+}
+
+fn width_cache_key(runs: &[TextRun], font_size: f32) -> String {
+    let text_len = runs.iter().map(|run| run.text.len()).sum::<usize>();
+    let mut key = String::with_capacity(text_len + runs.len() * 3 + 16);
+    key.push_str(&font_size.to_bits().to_string());
+    key.push('|');
+
+    for run in runs {
+        key.push(match run.style {
+            TextStyle::Normal => 'n',
+            TextStyle::Bold => 'b',
+            TextStyle::Italic => 'i',
+            TextStyle::Code => 'c',
+            TextStyle::Math => 'm',
+        });
+        key.push(':');
+        key.push_str(&run.text);
+        key.push('\u{0}');
+    }
+
+    key
 }
 
 pub(crate) fn attrs_for_style(style: TextStyle) -> Attrs<'static> {
