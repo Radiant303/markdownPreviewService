@@ -2,7 +2,7 @@
 
 一个基于 Rust + Axum 的 Markdown 转 PNG 图片服务。
 
-服务接收 Markdown 原文，渲染成带卡片样式的 PNG 图片返回。当前样式是浅灰背景、白色圆角卡片、橙色点缀、深色代码块，并保留代码语法高亮。正文排版使用 `cosmic-text` 做字体度量与自动换行。
+服务接收 Markdown 原文，渲染成带卡片样式的 PNG 图片返回。当前样式是浅灰背景、白色圆角卡片、橙色点缀、深色代码块，并保留代码语法高亮、表格、引用块和数学公式渲染。正文、标题、列表、引用和表格文本使用 `cosmic-text` 做字体度量与自动换行，数学公式由 MathJax 渲染为 SVG 后合成到最终 PNG。
 
 ## 效果预览
 
@@ -13,87 +13,43 @@
 
 - Markdown 转 PNG
 - 支持中文内容
-- 支持标题、段落、列表、分割线
+- 支持标题、段落、列表、引用块、分割线、表格
 - 支持任务列表
 - 支持代码块语法高亮
 - 代码块会先进行语法高亮，再按可用宽度自动换行
+- 支持行内数学公式和块级数学公式
+- 长行内公式会按可换行片段拆分，换行后保持同一公式字号，不做整体缩小
 - 支持中英文混排文本自动换行
-- 使用 `cosmic-text` 进行正文、标题、列表和引用的字体度量排版
-- 默认优先使用系统字体 `LXGW WenKai`，不存在时自动降级到常见中文字体
+- 使用 `cosmic-text` 进行正文、标题、列表、引用和表格的字体度量排版
+- 块级元素使用类似 CSS margin collapse 的间距折叠逻辑，标题、正文、代码块、公式块、表格、引用块和分割线的外部留白保持统一
+- 标题和正文使用明确的“块顶部 -> 文本基线”布局模型，避免大字号标题向上侵入前一个块
+- 内置 `LXGW WenKai` 与 `LXGW WenKai Mono` 字体，打包后的程序无需依赖系统预装字体
 
-## 前置操作：安装字体
+## 字体说明
 
-服务使用系统字体渲染 SVG 文本，推荐安装霞鹜文楷 TTF 字体，以获得最佳中文显示效果。
+服务已经通过 `include_bytes!` 将项目内字体打包进程序：
 
-当前字体栈优先级为：
+```text
+sources/fonts/LXGWWenKai-Regular.ttf
+sources/fonts/LXGWWenKai-Medium.ttf
+sources/fonts/LXGWWenKaiMono-Medium.ttf
+```
+
+这些字体会同时用于：
+
+- `cosmic-text` 文本度量与自动换行
+- `usvg/resvg` SVG 文本解析与 PNG 栅格化
+- 正文、标题、列表、引用、表格和代码块渲染
+
+因此正常运行 release exe 或 Docker 镜像时，不需要手动安装字体，也不需要刷新系统字体缓存。
+
+当前 SVG 字体栈仍保留系统字体作为兜底：
 
 ```css
 'LXGW WenKai', 'Microsoft YaHei', 'SimHei', 'Noto Sans CJK SC', sans-serif
 ```
 
-Docker 镜像已经内置项目字体并刷新字体缓存，使用 Docker 运行时不需要手动安装字体。
-
-如果系统没有安装 `LXGW WenKai`，会自动降级到后面的系统字体。
-
-### Windows 安装 TTF 字体
-
-1. 使用项目内的字体文件：
-   - `sources/fonts/LXGWWenKai-Regular.ttf`
-   - `sources/fonts/LXGWWenKai-Medium.ttf`
-   - `sources/fonts/LXGWWenKaiMono-Medium.ttf`
-2. 右键字体文件，选择 **安装** 或 **为所有用户安装**。
-3. 重新启动服务，让 `resvg/usvg` 重新加载系统字体。
-
-也可以将字体复制到：
-
-```text
-copy sources\fonts\LXGWWenKai-Regular.ttf C:\Windows\Fonts\
-copy sources\fonts\LXGWWenKai-Medium.ttf C:\Windows\Fonts\
-copy sources\fonts\LXGWWenKaiMono-Medium.ttf C:\Windows\Fonts\
-```
-
-### Linux 安装 TTF 字体
-
-为当前用户安装：
-
-```bash
-mkdir -p ~/.local/share/fonts
-cp sources/fonts/LXGWWenKai-Regular.ttf ~/.local/share/fonts/
-cp sources/fonts/LXGWWenKai-Medium.ttf ~/.local/share/fonts/
-cp sources/fonts/LXGWWenKaiMono-Medium.ttf ~/.local/share/fonts/
-fc-cache -fv
-```
-
-系统级安装：
-
-```bash
-sudo mkdir -p /usr/local/share/fonts/lxgw-wenkai
-sudo cp sources/fonts/LXGWWenKai-Regular.ttf /usr/local/share/fonts/lxgw-wenkai/
-sudo cp sources/fonts/LXGWWenKai-Medium.ttf /usr/local/share/fonts/lxgw-wenkai/
-sudo cp sources/fonts/LXGWWenKaiMono-Medium.ttf /usr/local/share/fonts/lxgw-wenkai/
-sudo fc-cache -fv
-```
-
-安装完成后可以检查字体是否可见：
-
-```bash
-fc-match "LXGW WenKai"
-```
-
-### macOS 安装 TTF 字体
-
-1. 双击 `.ttf` 字体文件。
-2. 在“字体册”中点击 **安装字体**。
-3. 重新启动服务。
-
-也可以复制到当前用户字体目录：
-
-```bash
-mkdir -p ~/Library/Fonts
-cp sources/fonts/LXGWWenKai-Regular.ttf ~/Library/Fonts/
-cp sources/fonts/LXGWWenKai-Medium.ttf ~/Library/Fonts/
-cp sources/fonts/LXGWWenKaiMono-Medium.ttf ~/Library/Fonts/
-```
+只有在你要用外部工具直接预览 SVG，或者调试系统字体回退时，才需要把字体安装到操作系统。
 
 ## 快速开始
 
@@ -134,7 +90,7 @@ Markdown-to-PNG Service is running
 拉取镜像：
 
 ```bash
-docker pull radiant303/markdown-preview-service:0.0.4
+docker pull radiant303/markdown-preview-service:latest
 ```
 
 启动服务：
@@ -144,7 +100,14 @@ docker run -d \
   --name markdown-preview-service \
   -p 3001:3001 \
   --restart unless-stopped \
-  radiant303/markdown-preview-service:0.0.4
+  radiant303/markdown-preview-service:latest
+```
+
+如果需要固定版本，可以使用：
+
+```bash
+docker pull radiant303/markdown-preview-service:0.0.7
+docker run -d --name markdown-preview-service -p 3001:3001 --restart unless-stopped radiant303/markdown-preview-service:0.0.7
 ```
 
 启动后访问：
@@ -330,7 +293,17 @@ output.png
 - [x] 支持任务列表
 - [ ] 待办事项
 
+> 这是一个引用块。引用中的中文、英文和行内代码也会参与统一排版。
+
 ---
+
+## 表格示例
+
+| 功能 | 状态 |
+| --- | --- |
+| 中文换行 | 已支持 |
+| 代码高亮 | 已支持 |
+| 数学公式 | 已支持 |
 
 ## 代码示例
 
@@ -338,25 +311,44 @@ output.png
 def greet(name: str) -> str:
     return f"Hello, {name}!"
 ```
+
+## 数学公式
+
+行内公式：$E = mc^2$
+
+块级公式：
+
+$$
+\frac{a}{\sin A} = \frac{b}{\sin B} = \frac{c}{\sin C} = 2R
+$$
 ````
 
 ## 样式说明
 
-主题样式主要在：
+当前代码已经按职责拆分，主要文件如下：
 
 ```text
-src/main.rs
+src/main.rs         HTTP 服务入口与 Markdown -> SVG -> PNG 流程
+src/constants.rs    画布尺寸、字号、行高、主题颜色
+src/svg_builder.rs  SVG 卡片布局与各类 Markdown 块渲染
+src/text.rs         文本 run、字体度量、自动换行
+src/code.rs         代码高亮与代码行折行
+src/math.rs         MathJax SVG 渲染与公式尺寸计算
+src/ast.rs          pulldown-cmark 事件到内部 AST 的转换
 ```
 
 相关位置：
 
 - 布局尺寸：`IMAGE_WIDTH`、`PADDING`、`BODY_FONT_SIZE`、`LINE_HEIGHT`
 - 主题颜色：`COLOR_SURFACE`、`COLOR_CARD`、`COLOR_TEXT`、`COLOR_SEED`
-- 代码块样式：`add_code_block`
+- 统一块间距：`BLOCK_GAP`、`apply_block_top_gap`、`set_block_bottom_gap`
 - 标题样式：`add_heading`
 - 正文样式：`add_paragraph`
-- 列表样式：`add_list_item`
-- 字体栈：`build` 中的 SVG `<style>`
+- 代码块样式：`add_code_block`
+- 数学公式块：`add_math_block`
+- 表格样式：`add_table`
+- 引用块样式：`render_quote`
+- 字体栈：`build` 中的 SVG `<style>` 与 `src/globals.rs` 中的字体加载
 
 当前正文字体优先级：
 
@@ -376,3 +368,5 @@ src/main.rs
 - 如果 Apifox 里看到乱码，通常是因为响应是 PNG 二进制，需要用图片预览或下载查看。
 - 修改代码后，如果你运行的是 `target/release/markdown-preview-service.exe`，需要重新执行 `cargo build --release`。
 - 当前渲染是手写 SVG 排版，不是浏览器排版引擎，因此复杂 Markdown/CSS 效果不会与浏览器完全一致。
+- 输出 PNG 的清晰度主要受 `IMAGE_WIDTH`、SVG 视口尺寸、字体文件质量和 `resvg/tiny-skia` 栅格化结果影响；当前默认宽度为 `1200px`。
+- 块间距采用折叠模型：上一个块的 bottom gap 与下一个块的 top gap 取较大值，而不是相加。
